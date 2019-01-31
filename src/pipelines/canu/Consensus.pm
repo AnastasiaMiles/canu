@@ -43,14 +43,20 @@ require Exporter;
 @EXPORT = qw(consensusConfigure consensusCheck consensusLoad consensusAnalyze alignGFA);
 
 use strict;
+use warnings "all";
+no  warnings "uninitialized";
 
 use File::Path 2.08 qw(make_path remove_tree);
 
 use canu::Defaults;
 use canu::Configure;
+
 use canu::Execution;
-use canu::Gatekeeper;
+use canu::SequenceStore;
 use canu::Unitig;
+
+use canu::Report;
+
 use canu::Grid_Cloud;
 
 
@@ -97,10 +103,10 @@ sub utgcns ($$$) {
     print F fetchFileShellCode("unitigging/$asm.\${tag}Store", "seqDB.v001.dat", "");
     print F fetchFileShellCode("unitigging/$asm.\${tag}Store", "seqDB.v001.tig", "");
     print F "\n";
-    print F fetchStoreShellCode("unitigging/$asm.\${tag}Store/partitionedReads.gkpStore", $path, "");
+    print F fetchSeqStorePartitionShellCode($asm, $path, "");
     print F "\n";
     print F "\$bin/utgcns \\\n";
-    print F "  -G ../$asm.\${tag}Store/partitionedReads.gkpStore \\\n";      #  Optional; utgcns will default to this
+    print F "  -S ../$asm.\${tag}Store/partitionedReads.seqStore \\\n";      #  Optional; utgcns will default to this
     print F "  -T ../$asm.\${tag}Store 1 \$jobid \\\n";
     print F "  -O ./\${tag}cns/\$jobid.cns.WORKING \\\n";
     print F "  -maxcoverage " . getGlobal('cnsMaxCoverage') . " \\\n";
@@ -135,16 +141,16 @@ sub cleanupPartitions ($$) {
     my $asm    = shift @_;
     my $tag    = shift @_;
 
-    return  if (! -e "unitigging/$asm.${tag}Store/partitionedReads.gkpStore/partitions/map");
+    return  if (! -e "unitigging/$asm.${tag}Store/partitionedReads.seqStore/partitions/map");
 
-    my $gkpTime = -M "unitigging/$asm.${tag}Store/partitionedReads.gkpStore/partitions/map";
+    my $seqTime = -M "unitigging/$asm.${tag}Store/partitionedReads.seqStore/partitions/map";
     my $tigTime = -M "unitigging/$asm.ctgStore/seqDB.v001.tig";
 
-    return  if ($gkpTime <= $tigTime);
+    return  if ($seqTime <= $tigTime);
 
-    print STDERR "-- Partitioned gkpStore is older than tigs, rebuild partitioning (gkpStore $gkpTime days old; ctgStore $tigTime days old).\n";
+    print STDERR "-- Partitioned seqStore is older than tigs, rebuild partitioning (seqStore $seqTime days old; ctgStore $tigTime days old).\n";
 
-    remove_tree("unitigging/$asm.${tag}Store/partitionedReads.gkpStore");
+    remove_tree("unitigging/$asm.${tag}Store/partitionedReads.seqStore");
 }
 
 
@@ -155,17 +161,15 @@ sub partitionReads ($$) {
     my $bin    = getBinDirectory();
     my $cmd;
 
-    return  if (-e "unitigging/$asm.${tag}Store/partitionedReads.gkpStore/partitions/map");
-    return  if (fileExists("unitigging/$asm.${tag}Store/partitionedReads.gkpStore.tar"));
-
-    fetchStore("unitigging/$asm.gkpStore");
+    return  if (-e "unitigging/$asm.${tag}Store/partitionedReads.seqStore/partitions/map");
+    return  if (fileExists("unitigging/$asm.${tag}Store.partitionedReads.seqStore.0001.tar"));
 
     fetchFile("unitigging/$asm.${tag}Store/seqDB.v001.dat");
     fetchFile("unitigging/$asm.${tag}Store/seqDB.v001.tig");
 
-    $cmd  = "$bin/gatekeeperPartition \\\n";
-    $cmd .= "  -G ./$asm.gkpStore \\\n";
-    $cmd .= "  -T ./$asm.${tag}Store 1 \\\n";
+    $cmd  = "$bin/sqStoreCreatePartition \\\n";
+    $cmd .= "  -S ../$asm.seqStore \\\n";
+    $cmd .= "  -T  ./$asm.${tag}Store 1 \\\n";
     $cmd .= "  -b " . getGlobal("cnsPartitionMin") . " \\\n"   if (defined(getGlobal("cnsPartitionMin")));
     $cmd .= "  -p " . getGlobal("cnsPartitions")   . " \\\n"   if (defined(getGlobal("cnsPartitions")));
     $cmd .= "> ./$asm.${tag}Store/partitionedReads.log 2>&1";
@@ -174,8 +178,9 @@ sub partitionReads ($$) {
         caExit("failed to partition the reads", "unitigging/$asm.${tag}Store/partitionedReads.log");
     }
 
-    stashStore("unitigging/$asm.${tag}Store/partitionedReads.gkpStore");
-    stashFile ("unitigging/$asm.${tag}Store/partitionedReads.log");
+    stashFile("unitigging/$asm.${tag}Store/partitionedReads.log");
+
+    stashSeqStorePartitions($asm, "unitigging", $tag, computeNumberOfConsensusJobs($asm, $tag));
 }
 
 
@@ -205,20 +210,19 @@ sub consensusConfigure ($) {
     my $cmd;
     my $path   = "unitigging/5-consensus";
 
-    goto allDone   if (skipStage($asm, "consensusConfigure") == 1);
     goto allDone   if ((fileExists("unitigging/$asm.ctgStore/seqDB.v002.tig")) &&
                        (fileExists("unitigging/$asm.utgStore/seqDB.v002.tig")));
 
     make_path($path)  if (! -d $path);
 
-    #  If the gkpStore partitions are older than the ctgStore unitig output, assume the unitigs have
-    #  changed and remove the gkpStore partition.  -M is (annoyingly) 'file age', so we need to
-    #  rebuild if gkp is older (larger) than tig.
+    #  If the seqStore partitions are older than the ctgStore unitig output, assume the unitigs have
+    #  changed and remove the seqStore partition.  -M is (annoyingly) 'file age', so we need to
+    #  rebuild if seq is older (larger) than tig.
 
     cleanupPartitions($asm, "ctg");
     cleanupPartitions($asm, "utg");
 
-    #  Partition gkpStore if needed.  Yeah, we could create both at the same time, with significant
+    #  Partition seqStore if needed.  Yeah, we could create both at the same time, with significant
     #  effort in coding it up.
 
     partitionReads($asm, "ctg");
@@ -248,7 +252,8 @@ sub consensusConfigure ($) {
     print STDERR "-- Configured $ctgjobs contig and $utgjobs unitig consensus jobs.\n";
 
   finishStage:
-    emitStage($asm, "consensusConfigure")   if ($firstTime);
+    generateReport($asm);
+    resetIteration("consensusConfigure")   if ($firstTime);
 
   allDone:
     stopAfter("consensusConfigure");
@@ -287,7 +292,7 @@ sub estimateMemoryNeededForConsensusJobs ($) {
     my $minMem = int($maxLen / 1000000 + 0.5) + 1;
     my $curMem = getGlobal("cnsMemory");
 
-    if (defined($curMem)) {
+    if (defined($curMem) && ($curMem > 0)) {
         if ($curMem < $minMem) {
             print STDERR "--\n";
             print STDERR "-- WARNING:\n";
@@ -321,7 +326,6 @@ sub consensusCheck ($) {
     my $attempt = getGlobal("canuIteration");
     my $path    = "unitigging/5-consensus";
 
-    goto allDone  if (skipStage($asm, "consensusCheck", $attempt) == 1);
     goto allDone  if ((fileExists("$path/ctgcns.files")) &&
                       (fileExists("$path/utgcns.files")));
     goto allDone  if (fileExists("unitigging/$asm.ctgStore/seqDB.v002.tig"));
@@ -401,7 +405,7 @@ sub consensusCheck ($) {
 
         #  Otherwise, run some jobs.
 
-        emitStage($asm, "consensusCheck", $attempt);
+        generateReport($asm);
 
         submitOrRunParallelJob($asm, "cns", $path, "consensus", @failedJobs);
         return;
@@ -422,7 +426,8 @@ sub consensusCheck ($) {
 
     stashFile("$path/utgcns.files");
 
-    emitStage($asm, "consensusCheck");
+    generateReport($asm);
+    resetIteration("consensusCheck");
 
   allDone:
 }
@@ -437,8 +442,8 @@ sub purgeFiles ($$$$$$) {
     my $Nlayout = shift @_;
     my $Nlog    = shift @_;
 
-    remove_tree("unitigging/$asm.ctgStore/partitionedReads.gkpStore");  #  The partitioned gkpStores
-    remove_tree("unitigging/$asm.utgStore/partitionedReads.gkpStore");  #  are useless now.  Bye bye!
+    remove_tree("unitigging/$asm.ctgStore/partitionedReads.seqStore");  #  The partitioned seqStores
+    remove_tree("unitigging/$asm.utgStore/partitionedReads.seqStore");  #  are useless now.  Bye bye!
 
     unlink "unitigging/$asm.ctgStore/partitionedReads.log";
     unlink "unitigging/$asm.utgStore/partitionedReads.log";
@@ -494,7 +499,6 @@ sub consensusLoad ($) {
     my $cmd;
     my $path    = "unitigging/5-consensus";
 
-    goto allDone    if (skipStage($asm, "consensusLoad") == 1);
     goto allDone    if ((fileExists("unitigging/$asm.ctgStore/seqDB.v002.tig")) &&
                         (fileExists("unitigging/$asm.utgStore/seqDB.v002.tig")));
 
@@ -520,8 +524,8 @@ sub consensusLoad ($) {
         close(F);
 
         $cmd  = "$bin/tgStoreLoad \\\n";
-        $cmd .= "  -G ./$asm.gkpStore \\\n";
-        $cmd .= "  -T ./$asm.ctgStore 2 \\\n";
+        $cmd .= "  -S ../$asm.seqStore \\\n";
+        $cmd .= "  -T  ./$asm.ctgStore 2 \\\n";
         $cmd .= "  -L ./5-consensus/ctgcns.files \\\n";
         $cmd .= "> ./5-consensus/ctgcns.files.ctgStoreLoad.err 2>&1";
 
@@ -546,8 +550,8 @@ sub consensusLoad ($) {
         close(F);
 
         $cmd  = "$bin/tgStoreLoad \\\n";
-        $cmd .= "  -G ./$asm.gkpStore \\\n";
-        $cmd .= "  -T ./$asm.utgStore 2 \\\n";
+        $cmd .= "  -S ../$asm.seqStore \\\n";
+        $cmd .= "  -T  ./$asm.utgStore 2 \\\n";
         $cmd .= "  -L ./5-consensus/utgcns.files \\\n";
         $cmd .= "> ./5-consensus/utgcns.files.utgStoreLoad.err 2>&1";
 
@@ -583,7 +587,9 @@ sub consensusLoad ($) {
     reportUnitigSizes($asm, 2, "after consensus generation");
 
   finishStage:
-    emitStage($asm, "consensusLoad");
+    generateReport($asm);
+    resetIteration("consensusLoad");
+
   allDone:
 }
 
@@ -595,10 +601,7 @@ sub consensusAnalyze ($) {
     my $bin     = getBinDirectory();
     my $cmd;
 
-    goto allDone   if (skipStage($asm, "consensusAnalyze") == 1);
     goto allDone   if (fileExists("unitigging/$asm.ctgStore.coverageStat.log"));
-
-    fetchStore("unitigging/$asm.gkpStore");
 
     fetchFile("unitigging/$asm.ctgStore/seqDB.v001.dat");  #  Shouldn't need this, right?
     fetchFile("unitigging/$asm.ctgStore/seqDB.v001.tig");  #  So why does it?
@@ -607,8 +610,8 @@ sub consensusAnalyze ($) {
     fetchFile("unitigging/$asm.ctgStore/seqDB.v002.tig");
 
     $cmd  = "$bin/tgStoreCoverageStat \\\n";
-    $cmd .= "  -G ./$asm.gkpStore \\\n";
-    $cmd .= "  -T ./$asm.ctgStore 2 \\\n";
+    $cmd .= "  -S ../$asm.seqStore \\\n";
+    $cmd .= "  -T  ./$asm.ctgStore 2 \\\n";
     $cmd .= "  -s " . getGlobal("genomeSize") . " \\\n";
     $cmd .= "  -o ./$asm.ctgStore.coverageStat \\\n";
     $cmd .= "> ./$asm.ctgStore.coverageStat.err 2>&1";
@@ -623,7 +626,8 @@ sub consensusAnalyze ($) {
     stashFile("unitigging/$asm.ctgStore.coverageStat.log");
 
   finishStage:
-    emitStage($asm, "consensusAnalyze");
+    generateReport($asm);
+    resetIteration("consensusAnalyze");
 
   allDone:
     stopAfter("consensus");
@@ -643,7 +647,6 @@ sub alignGFA ($) {
 
     #  This is just big enough to not fit comfortably in the canu process itself.
 
-    goto allDone   if (skipStage($asm, "alignGFA") == 1);
     goto allDone   if (fileExists("unitigging/4-unitigger/$asm.contigs.aligned.gfa") &&
                        fileExists("unitigging/4-unitigger/$asm.unitigs.aligned.gfa") &&
                        fileExists("unitigging/4-unitigger/$asm.unitigs.aligned.bed"));
@@ -651,15 +654,16 @@ sub alignGFA ($) {
     #  If a large genome, run this on the grid, else, run in the canu process itself.
     my $runGrid = (getGlobal("genomeSize") >= 40000000);
 
+    make_path($path);                  #  In cloud mode, 4-unitigger doesn't exist when we get here.
     fetchFile("$path/alignGFA.sh");
 
     if (! -e "$path/alignGFA.sh") {
-        open(F, "> $path/alignGFA.sh") or caExit("can't open '$path/alignGFA.sh.sh' for writing: $!\n", undef);
+        open(F, "> $path/alignGFA.sh") or caExit("can't open '$path/alignGFA.sh' for writing: $!\n", undef);
         print F "#!" . getGlobal("shell") . "\n";
         print F "\n";
         print F getBinDirectoryShellCode();
         print F "\n";
-        print F setWorkDirectoryShellCode($path)   if ($runGrid);   #  If not local, need to cd first.
+        print F setWorkDirectoryShellCode($path);
         print F "\n";
         print F fetchFileShellCode("unitigging/$asm.utgStore", "seqDB.v001.dat", "");
         print F fetchFileShellCode("unitigging/$asm.utgStore", "seqDB.v001.tig", "");
@@ -673,9 +677,10 @@ sub alignGFA ($) {
         print F fetchFileShellCode("unitigging/$asm.ctgStore", "seqDB.v002.dat", "");
         print F fetchFileShellCode("unitigging/$asm.ctgStore", "seqDB.v002.tig", "");
         print F "\n";
-        print F "\n";
 
         print F "if [ ! -e ./$asm.unitigs.aligned.gfa ] ; then\n";
+        print F    fetchFileShellCode("unitigging/4-unitigger", "$asm.unitigs.gfa", "  ");
+        print F "\n";
         print F "  \$bin/alignGFA \\\n";
         print F "    -T ../$asm.utgStore 2 \\\n";
         print F "    -i ./$asm.unitigs.gfa \\\n";
@@ -683,12 +688,14 @@ sub alignGFA ($) {
         print F "    -t " . getGlobal("gfaThreads") . " \\\n";
         print F "  > ./$asm.unitigs.aligned.gfa.err 2>&1";
         print F "\n";
-        print F stashFileShellCode("$path", "$asm.unitigs.aligned.gfa", "  ");
+        print F    stashFileShellCode("$path", "$asm.unitigs.aligned.gfa", "  ");
         print F "fi\n";
         print F "\n";
         print F "\n";
 
         print F "if [ ! -e ./$asm.contigs.aligned.gfa ] ; then\n";
+        print F    fetchFileShellCode("unitigging/4-unitigger", "$asm.contigs.gfa", "  ");
+        print F "\n";
         print F "  \$bin/alignGFA \\\n";
         print F "    -T ../$asm.ctgStore 2 \\\n";
         print F "    -i ./$asm.contigs.gfa \\\n";
@@ -696,12 +703,14 @@ sub alignGFA ($) {
         print F "    -t " . getGlobal("gfaThreads") . " \\\n";
         print F "  > ./$asm.contigs.aligned.gfa.err 2>&1";
         print F "\n";
-        print F stashFileShellCode("$path", "$asm.contigs.aligned.gfa", "  ");
+        print F    stashFileShellCode("$path", "$asm.contigs.aligned.gfa", "  ");
         print F "fi\n";
         print F "\n";
         print F "\n";
 
         print F "if [ ! -e ./$asm.unitigs.aligned.bed ] ; then\n";
+        print F    fetchFileShellCode("unitigging/4-unitigger", "$asm.unitigs.bed", "  ");
+        print F "\n";
         print F "  \$bin/alignGFA -bed \\\n";
         print F "    -T ../$asm.utgStore 2 \\\n";
         print F "    -C ../$asm.ctgStore 2 \\\n";
@@ -710,7 +719,7 @@ sub alignGFA ($) {
         print F "    -t " . getGlobal("gfaThreads") . " \\\n";
         print F "  > ./$asm.unitigs.aligned.bed.err 2>&1";
         print F "\n";
-        print F stashFileShellCode("$path", "$asm.unitigs.aligned.bed", "  ");
+        print F    stashFileShellCode("$path", "$asm.unitigs.aligned.bed", "  ");
         print F "fi\n";
         print F "\n";
         print F "\n";
@@ -732,7 +741,7 @@ sub alignGFA ($) {
 
     #  Since there is only one job, if we get here, we're not done.  Any other 'check' function
     #  shows how to process multiple jobs.  This only checks for the existence of the final outputs.
-    #  (meryl and unitig are the same)
+    #  (meryl-process and unitig are the same)
 
     #  If too many attempts, give up.
 
@@ -751,7 +760,7 @@ sub alignGFA ($) {
 
     #  Otherwise, run some jobs.
 
-    emitStage($asm, "alignGFA", $attempt);
+    generateReport($asm);
 
     if ($runGrid) {
         submitOrRunParallelJob($asm, "gfa", $path, "alignGFA", (1));
@@ -764,7 +773,8 @@ sub alignGFA ($) {
     return;
 
   finishStage:
-    emitStage($asm, "alignGFA");
+    generateReport($asm);
+    resetIteration("alignGFA");
 
   allDone:
 }

@@ -76,10 +76,13 @@
 #include "Alignment.H"
 #include "AlnGraphBoost.H"
 
+static int MAX_OFFSET = 10000;
+
 AlnGraphBoost::AlnGraphBoost(const std::string& backbone) {
     // initialize the graph structure with the backbone length + enter/exit
     // vertex
     size_t blen = backbone.length();
+    _templateLength = blen;
     _g = G(blen+1);
     for (size_t i = 0; i < blen+1; i++)
         boost::add_edge(i, i+1, _g);
@@ -102,6 +105,7 @@ AlnGraphBoost::AlnGraphBoost(const std::string& backbone) {
 }
 
 AlnGraphBoost::AlnGraphBoost(const size_t blen) {
+    _templateLength = blen;
     _g = G(blen+1);
     for (size_t i = 0; i < blen+1; i++)
         boost::add_edge(i, i+1, _g);
@@ -140,7 +144,10 @@ void AlnGraphBoost::addAln(dagAlignment& aln) {
             _g[_bbMap[currVtx]].base = targetBase;
 
             _g[currVtx].weight++;
-            addEdge(prevVtx, currVtx);
+            if (prevVtx != _enterVtx || bbPos <= MAX_OFFSET || MAX_OFFSET == 0)
+                addEdge(prevVtx, currVtx);
+            else
+                addEdge(_bbMap[bbPos-1], currVtx);
             bbPos++;
             prevVtx = currVtx;
         // query deletion
@@ -160,11 +167,17 @@ void AlnGraphBoost::addAln(dagAlignment& aln) {
             _g[newVtx].backbone = false;
             _g[newVtx].deleted = false;
             _bbMap[newVtx] = bbPos;
-            addEdge(prevVtx, newVtx);
+            if (prevVtx != _enterVtx || bbPos <= MAX_OFFSET || MAX_OFFSET == 0)
+               addEdge(prevVtx, newVtx);
+            else
+               addEdge(_bbMap[bbPos-1], newVtx);
             prevVtx = newVtx;
         }
     }
-    addEdge(prevVtx, _exitVtx);
+    if (bbPos + MAX_OFFSET >= _templateLength || MAX_OFFSET == 0)
+       addEdge(prevVtx, _exitVtx);
+    else
+       addEdge(prevVtx, _bbMap[bbPos]);
 }
 
 void AlnGraphBoost::addEdge(VtxDesc u, VtxDesc v) {

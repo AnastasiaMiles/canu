@@ -32,7 +32,10 @@
  */
 
 #include "ovStore.H"
-#include "gkStore.H"
+#include "sqStore.H"
+
+
+sqStore *ovOverlap::g = NULL;
 
 //  Even though the b_end_hi | b_end_lo is uint64 in the struct, the result
 //  of combining them doesn't appear to be 64-bit.  The cast is necessary.
@@ -64,7 +67,7 @@ ovOverlap::toString(char                  *str,
               (newLine) ? "\n" : "");
       break;
 
-    case ovOverlapAsRaw:
+    case ovOverlapAsUnaligned:
       sprintf(str, "%10" F_U32P " %10" F_U32P "  %c  %6" F_U32P "  %6" F_OVP " %6" F_OVP "  %6" F_OVP " %6" F_OVP "  %7.6f %s %s %s%s",
               a_iid, b_iid,
               flipped() ? 'I' : 'N',
@@ -78,34 +81,109 @@ ovOverlap::toString(char                  *str,
               (newLine) ? "\n" : "");
       break;
 
-    case ovOverlapAsCompat:
-      sprintf(str, "%8" F_U32P " %8" F_U32P "  %c  %6d  %6d  %5.2f  %5.2f%s",
-              a_iid,
-              b_iid,
-              dat.ovl.flipped ? 'I' : 'N',
-              a_hang(), b_hang(),
-              erate() * 100.0,
-              erate() * 100.0,
-              (newLine) ? "\n" : "");
-      break;
     case ovOverlapAsPaf:
       // miniasm/map expects entries to be separated by tabs
       // no padding spaces on names we don't confuse read identifiers
       sprintf(str, "%" F_U32P "\t%6" F_U32P "\t%6" F_U32P "\t%6" F_U32P "\t%c\t%" F_U32P "\t%6" F_U32P "\t%6" F_U32P "\t%6" F_U32P "\t%6" F_U32P "\t%6" F_U32P "\t%6" F_U32P " %s",
               a_iid,
-              (g->gkStore_getRead(a_iid)->gkRead_sequenceLength()), a_bgn(), a_end(),
+              (g->sqStore_getRead(a_iid)->sqRead_sequenceLength()), a_bgn(), a_end(),
               flipped() ? '-' : '+',
               b_iid,
-              (g->gkStore_getRead(b_iid)->gkRead_sequenceLength()), flipped() ? b_end() : b_bgn(), flipped() ? b_bgn() : b_end(),
+              (g->sqStore_getRead(b_iid)->sqRead_sequenceLength()), flipped() ? b_end() : b_bgn(), flipped() ? b_bgn() : b_end(),
               (uint32)floor(span() == 0 ? (1-erate() * (a_end()-a_bgn())) : (1-erate()) * span()),
               span() == 0 ? a_end() - a_bgn() : span(),
               255,
               (newLine) ? "\n" : "");
       break;
-
   }
 
   return(str);
+}
+
+
+
+bool
+ovOverlap::fromString(splitToWords          &W,
+                      ovOverlapDisplayType   type) {
+
+
+  switch (type) {
+    case ovOverlapAsHangs:
+      a_iid = W.touint32(0);
+      b_iid = W.touint32(1);
+
+      flipped(W[2][0] == 'I');
+
+      a_hang(W.touint32(3));
+      span(W.touint32(4));
+      b_hang(W.touint32(5));
+
+      erate(W.todouble(6));
+
+      break;
+
+    case ovOverlapAsCoords:
+      a_iid = W.touint32(0);
+      b_iid = W.touint32(1);
+
+      flipped(W[2][0] == 'I');
+
+      span(W.touint32(3));
+
+      {
+        uint32  alen = g->sqStore_getRead(a_iid)->sqRead_sequenceLength();
+        uint32  blen = g->sqStore_getRead(b_iid)->sqRead_sequenceLength();
+
+        uint32  abgn = W.touint32(4);
+        uint32  aend = W.touint32(5);
+
+        uint32  bbgn = W.touint32(6);
+        uint32  bend = W.touint32(7);
+
+        dat.ovl.ahg5 = abgn;
+        dat.ovl.ahg3 = alen - aend;
+
+        dat.ovl.bhg5 = (dat.ovl.flipped) ? blen - bbgn :        bbgn;
+        dat.ovl.bhg3 = (dat.ovl.flipped) ?        bend : blen - bend;
+      }
+
+      erate(W.todouble(8));
+      break;
+
+    case ovOverlapAsUnaligned:
+      a_iid = W.touint32(0);
+      b_iid = W.touint32(1);
+
+      flipped(W[2][0] == 'I');
+
+      dat.ovl.span = W.touint32(3);
+
+      dat.ovl.ahg5 = W.touint32(4);
+      dat.ovl.ahg3 = W.touint32(5);
+
+      dat.ovl.bhg5 = W.touint32(6);
+      dat.ovl.bhg3 = W.touint32(7);
+
+      erate(W.todouble(8));
+
+      dat.ovl.forUTG = false;
+      dat.ovl.forOBT = false;
+      dat.ovl.forDUP = false;
+
+      for (uint32 i = 9; i < W.numWords(); i++) {
+        dat.ovl.forUTG |= ((W[i][0] == 'U') && (W[i][1] == 'T') && (W[i][2] == 'G'));  //  Fails if W[i] == "U".
+        dat.ovl.forOBT |= ((W[i][0] == 'O') && (W[i][1] == 'B') && (W[i][2] == 'T'));
+        dat.ovl.forDUP |= ((W[i][0] == 'D') && (W[i][1] == 'U') && (W[i][2] == 'P'));
+      }
+      break;
+
+    case ovOverlapAsPaf:
+      break;
+  }
+
+#warning NEEDS TO RETURN FALSE IF FAILED TO DECODE OVERLAP STRING
+
+  return(true);
 }
 
 

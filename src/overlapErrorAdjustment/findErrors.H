@@ -27,7 +27,7 @@
 
 #include <pthread.h>
 
-#include "gkStore.H"
+#include "sqStore.H"
 #include "ovStore.H"
 
 #include "correctionOutput.H"
@@ -71,10 +71,6 @@ using namespace std;
 
 //  Factor by which to grow memory in olap array when reading it
 #define  EXPANSION_FACTOR            1.4
-
-//  Number of old fragments to read into memory-based fragment
-//  store at a time for processing
-#define  FRAGS_PER_BATCH             100000
 
 //  Longest name allowed for a file in the overlap store
 #define  MAX_FILENAME_LEN            1000
@@ -273,8 +269,6 @@ public:
 
 struct Thread_Work_Area_t {
   int32         thread_id;
-  uint32        loID;
-  uint32        hiID;
   uint64        nextOlap;
 
   feParameters *G;
@@ -304,7 +298,7 @@ struct Thread_Work_Area_t {
 class feParameters {
 public:
   feParameters() {
-    gkpStorePath   = NULL;
+    seqStorePath   = NULL;
     ovlStorePath   = NULL;
 
     bgnID          = 0;
@@ -328,7 +322,7 @@ public:
 
     //  Output
     Degree_Threshold = 2;  //, DEFAULT_DEGREE_THRESHOLD;
-    Use_Haplo_Ct     = TRUE;
+    Use_Haplo_Ct     = true;
 
     //  Analyze_Alignment
     End_Exclude_Len   = 3;  //DEFAULT_END_EXCLUDE_LEN;
@@ -344,7 +338,7 @@ public:
 
 
   //  Paths to stores
-  char         *gkpStorePath;
+  char         *seqStorePath;
   char         *ovlStorePath;
 
   // Range of IDs to process

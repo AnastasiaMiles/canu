@@ -49,36 +49,18 @@
  */
 
 #include "AS_global.H"
-#include "AS_UTL_decodeRange.H"
-#include "splitToWords.H"
+#include "strings.H"
 
-#include "gkStore.H"
+#include "sqStore.H"
 #include "ovStore.H"
 
-
-enum dumpOp {
-  OP_NONE             = 1,
-  OP_DUMP             = 2,
-  OP_DUMP_PICTURE     = 3
-};
+#include <algorithm>
+using namespace std;
 
 
-enum dumpFlags {
-  NO_5p               = 1,
-  NO_3p               = 2,
-  NO_CONTAINED        = 4,
-  NO_CONTAINS         = 8,
-  NO_CONTAINED_READS  = 16,
-  NO_SUSPICIOUS_READS = 32,
-  NO_SINGLETON_READS  = 64,
-  WITH_ERATE          = 128,
-  WITH_LENGTH         = 256,
-  ONE_SIDED           = 512,
-  GLOBAL_SCORE        = 1024
-};
 
-
-struct readStatus {
+class bogartStatus {
+public:
   uint64  best5id      : 29;
   uint64  best53p      : 1;  // Unwieldy - best edge from my 5' is to the 3' of 'best5id'.
 
@@ -92,67 +74,227 @@ struct readStatus {
 };
 
 
-class bogartStatus {
+
+class dumpParameters {
 public:
-  bogartStatus(const char *prefix, uint32 nReads);
-  ~bogartStatus() {
-    delete [] _status;
+  dumpParameters() {
+    no5p               = false;
+    no3p               = false;
+    noContainer        = false;
+    noContained        = false;
+    noRedundant        = false;
+
+    noBogartContained  = false;
+    noBogartSuspicious = false;
+    noBogartSingleton  = false;
+
+    erateMin           = 0.0;
+    erateMax           = 1.0;
+
+    lengthMin          = 0;
+    lengthMax          = UINT32_MAX;
+
+    queryMin           = 0;
+    queryMax           = UINT32_MAX;
+
+    status             = NULL;
+
+
+    ovlKept            = 0;
+    ovlFiltered        = 0;
+
+    ovl5p              = 0;
+    ovl3p              = 0;
+    ovlContainer       = 0;
+    ovlContained       = 0;
+    ovlRedundant       = 0;
+
+    ovlErateLo         = 0;
+    ovlErateHi         = 0;
+
+    ovlLengthLo        = 0;
+    ovlLengthHi        = 0;
   };
 
-  uint32  getBest5id(uint32 id)     { return((_status) ? (_status[id].best5id) : 0); };
-  bool    getBest53p(uint32 id)     { return((_status) ? (_status[id].best53p) : 0); };
+  ~dumpParameters() {
+    delete [] status;
+  };
 
-  uint32  getBest3id(uint32 id)     { return((_status) ? (_status[id].best3id) : false); };
-  bool    getBest33p(uint32 id)     { return((_status) ? (_status[id].best33p) : false); };
 
-  bool    getSingleton(uint32 id)   { return((_status) ? (_status[id].isSingleton)  : false); };
-  bool    getContained(uint32 id)   { return((_status) ? (_status[id].isContained)  : false); };
-  bool    getSuspicious(uint32 id)  { return((_status) ? (_status[id].isSuspicious) : false); };
+  bool        parametersAreDefaults(void) {       //  Returns true if all the parameters
+    return((no5p               == false) &&       //  are the default setting.
+           (no3p               == false) &&       //
+           (noContainer        == false) &&       //  This looks horrid, but it was easier
+           (noContained        == false) &&       //  and simpler than tracking what
+           (noRedundant        == false) &&       //  was set.  I'd need to make setter
+           (noBogartContained  == false) &&       //  functions for everything, make the
+           (noBogartSuspicious == false) &&       //  setter set a 'isChanged' flag, and
+           (noBogartSingleton  == false) &&       //  then update command line parsing.
+           (erateMin           == 0.0) &&         //
+           (erateMax           == 1.0) &&         //  It took longer to write this comment
+           (lengthMin          == 0) &&           //  than to write this function.
+           (lengthMax          == UINT32_MAX) &&  //
+           (queryMin           == 0) &&           //  So there.
+           (queryMax           == UINT32_MAX));
+  };
 
-private:
-  readStatus   *_status;
+  void        loadBogartStatus(const char *prefix, uint32 nReads);
+
+  void        drawPicture(uint32         Aid,
+                          ovOverlap     *overlaps,
+                          uint64         overlapsLen,
+                          sqStore       *seqStore,
+                          bool           withScores);
+
+
+  bool        filterOverlap(ovOverlap *overlap) {
+    double erate    = overlap->erate();
+    uint32 length   = (lengthMax - lengthMin) / 2;   //  until we compute it
+    int32  ahang    = overlap->a_hang();
+    int32  bhang    = overlap->b_hang();
+    bool   filtered = false;
+
+    if ((no5p == true) && (ahang < 0) && (bhang < 0)) {
+      ovl5p++;
+      filtered = true;
+    }
+
+    if ((no3p == true) && (ahang > 0) && (bhang > 0)) {
+      ovl3p++;
+      filtered = true;
+    }
+
+    if ((noContainer) && (ahang <= 0) && (bhang >= 0)) {
+      ovlContainer++;
+      filtered = true;
+    }
+
+    if ((noContained) && (ahang >= 0) && (bhang <= 0)) {
+      ovlContained++;
+      filtered = true;
+    }
+
+    if ((noRedundant) && (overlap->a_iid >= overlap->b_iid)) {
+      ovlRedundant++;
+      filtered = true;
+    }
+
+    if ((noBogartContained) && (status) && (status[overlap->b_iid].isContained == true)) {
+      filtered = true;
+    }
+
+    if ((noBogartSuspicious) && (status) && (status[overlap->b_iid].isSuspicious == true)) {
+      filtered = true;
+    }
+
+    if ((noBogartSingleton) && (status) && (status[overlap->b_iid].isSingleton == true)) {
+      filtered = true;
+    }
+
+    if ((overlap->b_iid < queryMin) ||
+        (queryMax < overlap->b_iid)) {
+      filtered = true;
+    }
+
+    if (erate < erateMin) {
+      ovlErateLo++;
+      filtered = true;
+    }
+
+    if (erate > erateMax) {
+      ovlErateHi++;
+      filtered = true;
+    }
+
+    if (length < lengthMin) {
+      ovlLengthLo++;
+      filtered = true;
+    }
+
+    if (length > lengthMax) {
+      ovlLengthHi++;
+      filtered = true;
+    }
+
+    return(filtered);
+  };
+
+  //  Filtering options.
+
+  bool           no5p;
+  bool           no3p;
+  bool           noContainer;
+  bool           noContained;
+  bool           noRedundant;
+
+  bool           noBogartContained;
+  bool           noBogartSuspicious;
+  bool           noBogartSingleton;
+
+  uint32         queryMin;
+  uint32         queryMax;
+
+  double         erateMin;
+  double         erateMax;
+
+  uint32         lengthMin;
+  uint32         lengthMax;
+
+  bogartStatus  *status;
+
+  //  Counts of what we filtered.
+
+  uint64         ovlKept;
+  uint64         ovlFiltered;
+
+  uint64         ovl5p;
+  uint64         ovl3p;
+  uint64         ovlContainer;
+  uint64         ovlContained;
+  uint64         ovlRedundant;
+
+  uint64         ovlErateHi;
+  uint64         ovlErateLo;
+
+  uint64         ovlLengthHi;
+  uint64         ovlLengthLo;
 };
 
 
 
-bogartStatus::bogartStatus(const char *prefix, uint32 nReads) {
+void
+dumpParameters::loadBogartStatus(const char *prefix, uint32 nReads) {
   char          EN[FILENAME_MAX+1];
   char          SN[FILENAME_MAX+1];
   char          GN[FILENAME_MAX+1];
   char          NN[FILENAME_MAX+1];
   splitToWords  W;
 
-  _status = NULL;
-
   if (prefix == NULL)
     return;
-
-  errno = 0;
 
   snprintf(EN, FILENAME_MAX, "%s.edges", prefix);
   snprintf(SN, FILENAME_MAX, "%s.edges.suspicious", prefix);
   snprintf(GN, FILENAME_MAX, "%s.singletons", prefix);
 
-  _status = new readStatus [nReads+1];
-
-  memset(_status, 0, sizeof(readStatus) * (nReads+1));
+  allocateArray(status, nReads+1, resizeArray_clearNew);
 
   FILE *E = AS_UTL_openInputFile(EN);
   fgets(NN, FILENAME_MAX, E);
   while (!feof(E)) {
     W.split(NN);
 
-    uint32  id = W(0);
+    uint32  id = W.touint32(0);
 
-    _status[id].best5id = W(2);
-    _status[id].best53p = (W[3][0] == '3');
+    status[id].best5id = W.touint64(2);
+    status[id].best53p = (W[3][0] == '3');
 
-    _status[id].best3id = W(4);
-    _status[id].best33p = (W[5][0] == '3');
+    status[id].best3id = W.touint64(4);
+    status[id].best33p = (W[5][0] == '3');
 
-    _status[id].isSingleton  = false;
-    _status[id].isContained  = ((W.numWords() > 10) && (W[10][0] == 'c'));
-    _status[id].isSuspicious = false;
+    status[id].isSingleton  = false;
+    status[id].isContained  = ((W.numWords() > 10) && (W[10][0] == 'c'));
+    status[id].isSuspicious = false;
 
     fgets(NN, FILENAME_MAX, E);
   }
@@ -164,17 +306,17 @@ bogartStatus::bogartStatus(const char *prefix, uint32 nReads) {
   while (!feof(S)) {
     W.split(NN);
 
-    uint32  id = W(0);
+    uint32  id = W.touint32(0);
 
-    _status[id].best5id = W(2);
-    _status[id].best53p = (W[3][0] == '3');
+    status[id].best5id = W.touint64(2);
+    status[id].best53p = (W[3][0] == '3');
 
-    _status[id].best3id = W(4);
-    _status[id].best33p = (W[5][0] == '3');
+    status[id].best3id = W.touint64(4);
+    status[id].best33p = (W[5][0] == '3');
 
-    _status[id].isSingleton  = false;
-    _status[id].isContained  = ((W.numWords() > 10) && (W[10][0] == 'c'));
-    _status[id].isSuspicious = true;
+    status[id].isSingleton  = false;
+    status[id].isContained  = ((W.numWords() > 10) && (W[10][0] == 'c'));
+    status[id].isSuspicious = true;
 
     fgets(NN, FILENAME_MAX, S);
   }
@@ -186,17 +328,17 @@ bogartStatus::bogartStatus(const char *prefix, uint32 nReads) {
   while (!feof(G)) {
     W.split(NN);
 
-    uint32  id = W(0);
+    uint32  id = W.touint32(0);
 
-    _status[id].best5id = 0;
-    _status[id].best53p = 0;
+    status[id].best5id = 0;
+    status[id].best53p = 0;
 
-    _status[id].best3id = 0;
-    _status[id].best33p = 0;
+    status[id].best3id = 0;
+    status[id].best33p = 0;
 
-    _status[id].isSingleton  = true;
-    _status[id].isContained  = false;
-    _status[id].isSuspicious = false;
+    status[id].isSingleton  = true;
+    status[id].isContained  = false;
+    status[id].isSuspicious = false;
 
     fgets(NN, FILENAME_MAX, G);
   }
@@ -204,258 +346,55 @@ bogartStatus::bogartStatus(const char *prefix, uint32 nReads) {
 }
 
 
+class sortByPosition {
+public:
+  bool operator()(const ovOverlap &a, const ovOverlap &b) {
+    if (a.a_bgn() < b.a_bgn())  return(true);
+    if (a.a_bgn() > b.a_bgn())  return(false);
 
-
-
-
-//
-//  Also accept a single ovStoreFile (output from overlapper) and dump.
-//
-
-//
-//  Then need some way of loading ascii overlaps into a store, or converting ascii overlaps to
-//  binary and use the normal store build.  The normal store build also needs to take sorted
-//  overlaps and just rewrite as a store.
-//
-
-void
-dumpStore(ovStore                *ovlStore,
-          gkStore                *gkpStore,
-          char                   *outPrefix,
-          bool                    asBinary,
-          bool                    asCounts,
-          bool                    asErateLen,
-          double                  dumpERate,
-          uint32           UNUSED(dumpLength),
-          uint32                  dumpType,
-          uint32                  bgnID,
-          uint32                  endID,
-          uint32                  qryID,
-          ovOverlapDisplayType    type,
-          bool                    beVerbose,
-          char            *UNUSED(bestPrefix)) {
-
-  uint64             evalue = AS_OVS_encodeEvalue(dumpERate);
-  char               ovlString[1024];
-
-  uint32             ovlTooHighError = 0;
-  uint32             ovlNot5p        = 0;
-  uint32             ovlNot3p        = 0;
-  uint32             ovlNotContainer = 0;
-  uint32             ovlNotContainee = 0;
-  uint32             ovlNotUnique    = 0;
-  uint32             ovlDumped       = 0;
-  uint32             obtTooHighError = 0;
-  uint32             obtDumped       = 0;
-  uint32             merDumped       = 0;
-
-  uint32            *counts     = NULL;
-  ovStoreHistogram  *hist       = NULL;
-
-  ovFile            *binaryFile = NULL;
-
-  //  Set the range of the reads to dump early so that we can reset it later.
-
-  ovlStore->setRange(bgnID, endID);
-
-  //  If we're dumping counts, and there are modifiers, we need to scan all overlaps
-
-  if ((asCounts) && (dumpType != 0)) {
-    counts = new uint32 [endID - bgnID + 1];
-
-    for (uint32 ii=bgnID; ii<=endID; ii++)
-      counts[ii - bgnID] = 0;
-  }
-
-  //  If we're dumping counts, and no modifiers, we can just ask the store for the counts
-  //  and set the range to null.  Argh, the rest of the code expects counts[] to start at
-  //  bgnID, so we need to rewrite everything.
-
-  if ((asCounts) && (dumpType == 0)) {
-    counts = ovlStore->numOverlapsPerRead(endID);
-    ovlStore->setRange(1, 0);
-
-    for (uint32 ii=bgnID; ii<=endID; ii++)
-      counts[ii - bgnID] = counts[ii];
-  }
-
-  //  If we're dumping the erate-vs-length histogram, and no modifiers, grab it from the store and
-  //  set the range to null.  Otherwise, allocate a new one.
-
-  if ((asErateLen) && (dumpType == 0)) {
-    hist = ovlStore->getHistogram();
-    ovlStore->setRange(1, 0);
-  }
-
-  if ((asErateLen) && (dumpType > 0)) {
-    hist = new ovStoreHistogram(gkpStore, ovFileNormalWrite);
-  }
-
-  //  If dumping binary, create an output file.
-
-  if (asBinary) {
-    char  binaryName[FILENAME_MAX];
-
-    sprintf(binaryName, "%s.ovb", outPrefix);
-
-    binaryFile = new ovFile(gkpStore, binaryName, ovFileFullWrite);
-  }
-
-  //  Length filtering is expensive to compute, need to load both reads to get their length.
-  //
-  //if ((dumpType & WITH_LENGTH) && (dumpLength < overlapLength(overlap)))
-  //  continue;
-
-  ovOverlap      overlap(gkpStore);
-
-  while (ovlStore->readOverlap(&overlap) == TRUE) {
-    if ((qryID != 0) && (qryID != overlap.b_iid))
-      continue;
-
-    if ((dumpType & WITH_ERATE) && (overlap.evalue() > evalue)) {
-      ovlTooHighError++;
-      continue;
-    }
-
-    int32 ahang = overlap.a_hang();
-    int32 bhang = overlap.b_hang();
-
-    if ((dumpType & NO_5p) && (ahang < 0) && (bhang < 0)) {
-      ovlNot5p++;
-      continue;
-    }
-
-    if ((dumpType & NO_3p) && (ahang > 0) && (bhang > 0)) {
-      ovlNot3p++;
-      continue;
-    }
-
-    if ((dumpType & NO_CONTAINS) && (ahang >= 0) && (bhang <= 0)) {
-      ovlNotContainer++;
-      continue;
-    }
-
-    if ((dumpType & NO_CONTAINED) && (ahang <= 0) && (bhang >= 0)) {
-      ovlNotContainee++;
-      continue;
-    }
-
-    if ((dumpType & ONE_SIDED) && (overlap.a_iid >= overlap.b_iid)) {
-       ovlNotUnique++;
-       continue;
-    }
-
-    ovlDumped++;
-
-    //  The toString() method is quite slow, all from snprintf().
-    //    Without both the puts() and AtoString(), a dump ran in 3 seconds.
-    //    With both, 138 seconds.
-    //    Without the puts(), 127 seconds.
-
-    if      (asCounts)
-      counts[overlap.a_iid - bgnID]++;
-
-    else if (asErateLen)
-      hist->addOverlap(&overlap);
-
-    else if (asBinary)
-      binaryFile->writeOverlap(&overlap);
-
-    else
-      fputs(overlap.toString(ovlString, type, true), stdout);
-  }
-
-  if (asCounts) {
-    for (uint32 ii=bgnID; ii<=endID; ii++)
-      fprintf(stdout, "%u\t%u\n", ii, counts[ii - bgnID]);
-  }
-
-  if (asErateLen) {
-    hist->dumpEvalueLength(stdout);
-  }
-
-  delete    binaryFile;
-  delete    hist;
-  delete [] counts;
-
-  if (beVerbose) {
-    fprintf(stderr, "ovlTooHighError %u\n",  ovlTooHighError);
-    fprintf(stderr, "ovlNot5p        %u\n",  ovlNot5p);
-    fprintf(stderr, "ovlNot3p        %u\n",  ovlNot3p);
-    fprintf(stderr, "ovlNotContainer %u\n",  ovlNotContainer);
-    fprintf(stderr, "ovlNotContainee %u\n",  ovlNotContainee);
-    fprintf(stderr, "ovlDumped       %u\n",  ovlDumped);
-    fprintf(stderr, "obtTooHighError %u\n",  obtTooHighError);
-    fprintf(stderr, "obtDumped       %u\n",  obtDumped);
-    fprintf(stderr, "merDumped       %u\n",  merDumped);
-  }
-}
-
-
-
-int
-sortOBT(const void *a, const void *b) {
-  ovOverlap const *A = (ovOverlap const *)a;
-  ovOverlap const *B = (ovOverlap const *)b;
-
-  if (A->a_bgn() < B->a_bgn())  return(-1);
-  if (A->a_bgn() > B->a_bgn())  return(1);
-
-  //  For overlaps off the 5' end, put the thinnest ones first.  Sadly, we don't know
-  //  gkpStore here, and can't actually get the end coordinate.
-  //
-  //if (A->b_bgn() > B->b_bgn())  return(-1);
-  //if (A->b_bgn() < B->b_bgn())  return(1);
-
-  if (A->a_end() < B->a_end())  return(-1);
-  if (A->a_end() > B->a_end())  return(1);
-
-  return(0);
-}
-
+    return(a.a_end() < b.a_end());
+  };
+};
 
 
 
 void
-dumpPicture(ovOverlap     *overlaps,
-            uint64         novl,
-            gkStore       *gkpStore,
-            uint32         qryID,
-            bogartStatus  *bogart,
-            uint32         dumpType,
-            gkRead_version clearType) {
-  char     ovl[256] = {0};
+dumpParameters::drawPicture(uint32         Aid,
+                            ovOverlap     *overlaps,
+                            uint64         overlapsLen,
+                            sqStore       *seqStore,
+                            bool           withScores) {
+  char     line[256] = {0};
 
-  uint32   MHS = 9;  //  Max Hang Size, amount of padding for "+### "
+  uint32   MHS   = 9;  //  Max Hang Size, amount of padding for "+### "
 
-  uint32    Aid    = qryID;
-  gkRead   *A      = gkpStore->gkStore_getRead(Aid);
-  uint32   frgLenA = A->gkRead_sequenceLength(clearType);
+  sqRead   *A    = seqStore->sqStore_getRead(Aid);
+  uint32    Alen = A->sqRead_sequenceLength();
 
   for (int32 i=0; i<256; i++)
-    ovl[i] = ' ';
+    line[i] = ' ';
 
   for (int32 i=0; i<100; i++)
-    ovl[i + MHS] = '-';
-  ovl[ 99 + MHS] = '>';
-  ovl[100 + MHS] = 0;
+    line[i + MHS] = '-';
+  line[ 99 + MHS] = '>';
+  line[100 + MHS] = 0;
 
   fprintf(stdout, "A %7d:%-7d A %9d %7d:%-7d %7d          %s %s%s\n",
-          0, frgLenA,
+          0, Alen,
           Aid,
-          0, frgLenA, frgLenA,
-          ovl,
-          bogart->getContained(Aid)  ? "contained"  : "",
-          bogart->getSuspicious(Aid) ? "suspicious" : "");
+          0, Alen, Alen,
+          line,
+          ((status) && (status[Aid].isContained))  ? "contained"  : "",
+          ((status) && (status[Aid].isSuspicious)) ? "suspicious" : "");
 
-  qsort(overlaps, novl, sizeof(ovOverlap), sortOBT);
+  sort(overlaps, overlaps + overlapsLen, sortByPosition());
 
   //  Build ascii representations for each overlapping read.
 
-  for (uint32 o=0; o<novl; o++) {
-    uint32    Bid    = overlaps[o].b_iid;
-    gkRead   *B      = gkpStore->gkStore_getRead(Bid);
-    uint32   frgLenB = B->gkRead_sequenceLength(clearType);
+  for (uint32 o=0; o<overlapsLen; o++) {
+    uint32    Bid  = overlaps[o].b_iid;
+    sqRead   *B    = seqStore->sqStore_getRead(Bid);
+    uint32    Blen = B->sqRead_sequenceLength();
 
     //  Find bgn/end points on each read.  If the overlap is reverse complement,
     //  the B coords are flipped so that bgn > end.
@@ -475,14 +414,14 @@ dumpPicture(ovOverlap     *overlaps,
 
     //  For the A read, find the points in our string representation where the overlap ends.
 
-    uint32 ovlStrBgn = (int32)floor(ovlBgnA * 100.0 / frgLenA + MHS);
-    uint32 ovlStrEnd = (int32)ceil (ovlEndA * 100.0 / frgLenA + MHS);
+    uint32 ovlStrBgn = (int32)floor(ovlBgnA * 100.0 / Alen + MHS);
+    uint32 ovlStrEnd = (int32)ceil (ovlEndA * 100.0 / Alen + MHS);
 
     //  Fill the string representation with spaces, then fill the string with dashes where the read
     //  is, add an arrow, and terminate the string.
 
     for (int32 i=0; i<256; i++)
-      ovl[i] = ' ';
+      line[i] = ' ';
 
     //  Decide how to draw this overlap.
     //    For best edges, use '='.
@@ -490,10 +429,10 @@ dumpPicture(ovOverlap     *overlaps,
     //    For suspicious, use '*', alternating with dashes.
     //    For edges,      use '-', solid.
 
-    bool  isBest = (((bogart->getBest5id(Aid) == Bid) && (overlaps[o].overlapAEndIs5prime() == true)) ||
-                    ((bogart->getBest3id(Aid) == Bid) && (overlaps[o].overlapAEndIs3prime() == true)));
-    bool  isCont = (bogart->getContained(Bid));
-    bool  isSusp = (bogart->getSuspicious(Bid));
+    bool  isBest = ((status) && (((status[Aid].best5id == Bid) && (overlaps[o].overlapAEndIs5prime() == true)) ||
+                                 ((status[Aid].best3id == Bid) && (overlaps[o].overlapAEndIs3prime() == true))));
+    bool  isCont = ((status) && (status[Bid].isContained));
+    bool  isSusp = ((status) && (status[Bid].isSuspicious));
 
     //  This bit of confusion makes sure that the alternating overlap lines (especially '- - - -')
     //  end with a dash.
@@ -502,30 +441,30 @@ dumpPicture(ovOverlap     *overlaps,
 
     if      (isCont == true) {
       for (uint32 i=ovlStrBgn; i<ovlStrEnd; i++)
-        ovl[i] = (oddEven = !oddEven) ? '-' : ' ';
+        line[i] = (oddEven = !oddEven) ? '-' : ' ';
     }
 
     else if (isSusp == true) {
       for (uint32 i=ovlStrBgn; i<ovlStrEnd; i++)
-        ovl[i] = (oddEven = !oddEven) ? '-' : '*';
+        line[i] = (oddEven = !oddEven) ? '-' : '*';
     }
 
     else {
       char  c = (isBest) ? '=' : '-';
 
       for (uint32 i=ovlStrBgn; i<ovlStrEnd; i++)
-        ovl[i] = c;
+        line[i] = c;
     }
 
     if (overlaps[o].flipped() == true)
-      ovl[ovlStrBgn] = '<';
+      line[ovlStrBgn] = '<';
     else
-      ovl[ovlStrEnd-1] = '>';
+      line[ovlStrEnd-1] = '>';
 
-    assert(ovl[ovlStrBgn]   != ' ');
-    assert(ovl[ovlStrEnd-1] != ' ');
+    assert(line[ovlStrBgn]   != ' ');
+    assert(line[ovlStrEnd-1] != ' ');
 
-    ovl[ovlStrEnd] = 0;
+    line[ovlStrEnd] = 0;
 
     //  For the B read, find how much is unaliged on each end.  Though the store directly keeps this information,
     //  we can't get to it, and have to reverse the compuitation.
@@ -535,9 +474,9 @@ dumpPicture(ovOverlap     *overlaps,
 
     if (overlaps[o].flipped() == false) {
       ovlBgnHang = ovlBgnB;
-      ovlEndHang = frgLenB - ovlEndB;
+      ovlEndHang = Blen - ovlEndB;
     } else {
-      ovlBgnHang = frgLenB - ovlBgnB;
+      ovlBgnHang = Blen - ovlBgnB;
       ovlEndHang = ovlEndB;
     }
 
@@ -550,69 +489,63 @@ dumpPicture(ovOverlap     *overlaps,
       len = strlen(str);
 
       for (int32 i=0; i<len; i++)
-        ovl[ovlStrBgn - len - 1 + i] = str[i];
+        line[ovlStrBgn - len - 1 + i] = str[i];
     }
 
     //  Append the end hang.
     if (ovlEndHang > 0) {
-      snprintf(ovl + ovlStrEnd, 256 - ovlStrEnd, " +%d", ovlEndHang);
+      snprintf(line + ovlStrEnd, 256 - ovlStrEnd, " +%d", ovlEndHang);
     }
 
-    //  Set flags for best edge and singleton/contained/suspicious.  Left in for when I get annoyed with the different lines.
+    //  Set flags for best edge and singleton/contained/suspicious.
 
     char  olapClass[4] = { 0 };
 
-#if 0
-    if ((bogart->getBest5id(Aid) == Bid) &&
-        (overlaps[o].overlapAEndIs5prime() == true)) {
+    if ((status) && (status[Aid].best5id == Bid) && (overlaps[o].overlapAEndIs5prime() == true)) {
       olapClass[0] = ' ';
       olapClass[1] = ' ';
       olapClass[2] = 'B';
     }
 
-    if ((bogart->getBest3id(Aid) == Bid) &&
-        (overlaps[o].overlapAEndIs3prime() == true)) {
+    if ((status) && (status[Aid].best3id == Bid) && (overlaps[o].overlapAEndIs3prime() == true)) {
       olapClass[0] = ' ';
       olapClass[1] = ' ';
       olapClass[2] = 'B';
     }
 
     if (olapClass[2] == 'B')
-      for (uint32 ii=0; ovl[ii]; ii++)
-        if (ovl[ii] == '-')
-          ovl[ii] = '=';
+      for (uint32 ii=0; line[ii]; ii++)
+        if (line[ii] == '-')
+          line[ii] = '=';
 
-
-
-    if (bogart->getSingleton(Bid)) {
+    if ((status) && (status[Bid].isSingleton)) {
       olapClass[0] = ' ';
       olapClass[1] = 'S';
     }
 
-    if (bogart->getContained(Bid)) {
+    if ((status) && (status[Bid].isContained)) {
       olapClass[0] = ' ';
       olapClass[1] = 'C';
     }
 
-    if (bogart->getSuspicious(Bid)) {
+    if ((status) && (status[Bid].isSuspicious)) {
       olapClass[0] = ' ';
       olapClass[1] = '!';
     }
-#endif
 
     //  Report!
 
-    if ((dumpType & GLOBAL_SCORE) == GLOBAL_SCORE)
+    if (withScores)
       fprintf(stdout, "A %7d:%-7d B %9d %7d:%-7d %7d %7hu %5.2f%%  %s%s\n",
               ovlBgnA,
               ovlEndA,
               Bid,
               min(ovlBgnB, ovlEndB),
               max(ovlBgnB, ovlEndB),
-              frgLenB,
+              Blen,
               overlaps[o].overlapScore(),
               overlaps[o].erate() * 100.0,
-              ovl,
+              line,
               olapClass);
     else
       fprintf(stdout, "A %7d:%-7d B %9d %7d:%-7d %7d  %5.2f%%  %s%s\n",
@@ -621,357 +554,529 @@ dumpPicture(ovOverlap     *overlaps,
               Bid,
               min(ovlBgnB, ovlEndB),
               max(ovlBgnB, ovlEndB),
-              frgLenB,
+              Blen,
               overlaps[o].erate() * 100.0,
-              ovl,
+              line,
               olapClass);
   }
 }
 
 
 
-
-void
-dumpPicture(ovStore        *ovlStore,
-            gkStore        *gkpStore,
-            double          dumpERate,
-            uint32          dumpLength,
-            uint32          dumpType,
-            uint32          qryID,
-            char           *bestPrefix,
-            gkRead_version  clearType) {
-
-  //fprintf(stderr, "DUMPING PICTURE for ID " F_U32 " in store %s (gkp %s)\n",
-  //        qryID, ovlName, gkpName);
-
-  uint32    Aid    = qryID;
-  gkRead   *A      = gkpStore->gkStore_getRead(Aid);
-  uint32   frgLenA = A->gkRead_sequenceLength(clearType);
-
-  ovlStore->setRange(Aid, Aid);
-
-  uint64         novl     = 0;
-  ovOverlap     overlap(gkpStore);
-  ovOverlap    *overlaps = ovOverlap::allocateOverlaps(gkpStore, ovlStore->numOverlapsInRange());
-  uint64         evalue   = AS_OVS_encodeEvalue(dumpERate);
-
-  //  Load bogart status, if supplied.
-
-  bogartStatus   *bogart = new bogartStatus(bestPrefix, gkpStore->gkStore_getNumReads());
-
-  //  Load all the overlaps so we can sort by the A begin position.
-
-  while (ovlStore->readOverlap(&overlap) == TRUE) {
-
-    //  Filter out garbage overlaps.
-    if (overlap.evalue() > evalue)
-      continue;
-
-    //  Filter out 5' overlaps.
-    if ((dumpType & NO_5p) &&
-        (overlap.a_hang() < 0) && (overlap.b_hang() < 0))
-      continue;
-
-    //  Filter out 3' overlaps.
-    if ((dumpType & NO_3p) &&
-        (overlap.a_hang() > 0) && (overlap.b_hang() > 0))
-      continue;
-
-    //  Filter out contained overlaps (B-read is contained)
-    if ((dumpType & NO_CONTAINS) &&
-        (overlap.a_hang() >= 0) && (overlap.b_hang() <= 0))
-      continue;
-
-    //  Filter out container overlaps (A-read is contained)
-    if ((dumpType & NO_CONTAINED) &&
-        (overlap.a_hang() <= 0) && (overlap.b_hang() >= 0))
-      continue;
-
-    //  Filter out short overlaps.
-    if ((overlap.b_end() - overlap.b_bgn() < dumpLength) ||
-        (overlap.a_end() - overlap.a_bgn() < dumpLength))
-      continue;
-
-    //  If bogart data is supplied, filter out contained or suspicious overlaps.
-
-    if ((dumpType & NO_CONTAINED_READS) &&
-        (bogart->getContained(overlap.b_iid)))
-      continue;
-
-    if ((dumpType & NO_SUSPICIOUS_READS) &&
-        (bogart->getSuspicious(overlap.b_iid)))
-      continue;
-
-    if ((dumpType & NO_SINGLETON_READS) &&
-        (bogart->getSingleton(overlap.b_iid)))
-      continue;
-
-    overlaps[novl++] = overlap;
-  }
-
-
-  if (novl == 0)
-    fprintf(stderr, "no overlaps to show.\n");
-  else
-    dumpPicture(overlaps, novl, gkpStore, Aid, bogart, dumpType, clearType);
-
-  delete    bogart;
-  delete [] overlaps;
-}
-
-
-
-
-
-
 int
 main(int argc, char **argv) {
-  uint32          operation   = OP_NONE;
+  char                 *seqName     = NULL;
+  char                 *ovlName     = NULL;
+  char                 *outPrefix   = NULL;
+  char                 *bogartPath  = NULL;
 
-  char           *gkpName     = NULL;
-  char           *ovlName     = NULL;
+  dumpParameters        params;
 
-  char           *outPrefix   = NULL;
+  char                  ovlString[1024];
 
-  bool            asBinary    = false;
-  bool            asCounts    = false;
-  bool            asErateLen  = false;
+  bool                  asOverlaps  = true;    //  What to show?
+  bool                  asPicture   = false;
+  bool                  asMetadata  = false;
+  bool                  asCounts    = false;
+  bool                  asErateLen  = false;
 
-  double          dumpERate   = 1.0;
-  uint32          dumpLength  = 0;
-  uint32          dumpType    = 0;
+  bool                  asCoords    = true;       //  How to show overlaps?
+  bool                  asHangs     = false;
+  bool                  asUnaligned = false;
+  bool                  asPAF       = false;
+  bool                  asBinary    = false;
+  bool                  withScores  = false;
 
-  gkRead_version  clearType   = gkRead_latest;
-
-  char           *erateFile   = NULL;
-
-  uint32          bgnID       = 1;
-  uint32          endID       = UINT32_MAX;
-  uint32          qryID       = 0;
-
-  bool            beVerbose   = false;
-
-  char           *bestPrefix  = NULL;
-
-  ovOverlapDisplayType  type = ovOverlapAsCoords;
+  uint32                bgnID       = 1;
+  uint32                endID       = UINT32_MAX;
 
   argc = AS_configure(argc, argv);
 
-  int arg=1;
-  int err=0;
+  vector<char *>  err;
+  int             arg=1;
   while (arg < argc) {
-
-    if      (strcmp(argv[arg], "-G") == 0)
-      gkpName = argv[++arg];
+    if      (strcmp(argv[arg], "-S") == 0)
+      seqName = argv[++arg];
 
     else if (strcmp(argv[arg], "-O") == 0)
       ovlName = argv[++arg];
 
 
-    //  Standard bulk dump of overlaps
-    else if (strcmp(argv[arg], "-d") == 0) {
-      operation  = OP_DUMP;
-
+    else if (strcmp(argv[arg], "-overlaps") == 0) {
+      asOverlaps = true;
+      asPicture  = false;
+      asMetadata = false;
+      asCounts   = false;
+      asErateLen = false;
       if ((arg+1 < argc) && (argv[arg+1][0] != '-'))
-        AS_UTL_decodeRange(argv[++arg], bgnID, endID);
+        decodeRange(argv[++arg], bgnID, endID);
     }
 
-    //  Dump as a picture
-    else if (strcmp(argv[arg], "-p") == 0) {
-      operation  = OP_DUMP_PICTURE;
-
+    else if ((strcmp(argv[arg], "-picture") == 0) ||
+             (strcmp(argv[arg], "-p")       == 0)) {
+      asOverlaps = false;
+      asPicture  = true;
+      asMetadata = false;
+      asCounts   = false;
+      asErateLen = false;
       if ((arg+1 < argc) && (argv[arg+1][0] != '-'))
-        AS_UTL_decodeRange(argv[++arg], bgnID, endID);
+        decodeRange(argv[++arg], bgnID, endID);
     }
 
-    //  Query if the overlap for the next two integers exists
-    else if (strcmp(argv[arg], "-q") == 0) {
-      operation  = OP_DUMP;
-      bgnID      = atoi(argv[++arg]);
-      endID      = bgnID;
-      qryID      = atoi(argv[++arg]);
+    else if (strcmp(argv[arg], "-metadata") == 0) {
+      asOverlaps = false;
+      asPicture  = false;
+      asMetadata = true;
+      asCounts   = false;
+      asErateLen = false;
+      if ((arg+1 < argc) && (argv[arg+1][0] != '-'))
+        decodeRange(argv[++arg], bgnID, endID);
     }
 
-    //  Format of the read
+    else if (strcmp(argv[arg], "-counts") == 0) {
+      asOverlaps = false;
+      asPicture  = false;
+      asMetadata = false;
+      asCounts   = true;
+      asErateLen = false;
+      if ((arg+1 < argc) && (argv[arg+1][0] != '-'))        //  NOT CORRECT
+        decodeRange(argv[++arg], bgnID, endID);
+    }
+
+    else if (strcmp(argv[arg], "-eratelen") == 0) {
+      asOverlaps = false;
+      asPicture  = false;
+      asMetadata = false;
+      asCounts   = false;
+      asErateLen = true;
+      if ((arg+1 < argc) && (argv[arg+1][0] != '-'))        //  NOT CORRECT
+        decodeRange(argv[++arg], bgnID, endID);
+    }
+
+
+    else if (strcmp(argv[arg], "-prefix") == 0)
+      outPrefix = argv[++arg];
+
+
     else if (strcmp(argv[arg], "-raw") == 0)
-      clearType = gkRead_raw;
+      sqRead_setDefaultVersion(sqRead_raw);
+
     else if (strcmp(argv[arg], "-obt") == 0)
-      clearType = gkRead_corrected;
+      sqRead_setDefaultVersion(sqRead_corrected);
+
     else if (strcmp(argv[arg], "-utg") == 0)
-      clearType = gkRead_trimmed;
+      sqRead_setDefaultVersion(sqRead_trimmed);
 
-    //  Format of the dump
-    else if (strcmp(argv[arg], "-coords") == 0)
-      type = ovOverlapAsCoords;
 
-    else if (strcmp(argv[arg], "-hangs") == 0)
-      type = ovOverlapAsHangs;
+    else if (strcmp(argv[arg], "-coords") == 0) {
+      asCoords    = true;
+      asHangs     = false;
+      asUnaligned = false;
+      asPAF       = false;
+      asBinary    = false;
+    }
 
-    else if (strcmp(argv[arg], "-raw") == 0)
-      type = ovOverlapAsRaw;
+    else if (strcmp(argv[arg], "-hangs") == 0) {
+      asCoords    = false;
+      asHangs     = true;
+      asUnaligned = false;
+      asPAF       = false;
+      asBinary    = false;
+    }
 
-    else if (strcmp(argv[arg], "-paf") == 0)
-      type = ovOverlapAsPaf;
+    else if (strcmp(argv[arg], "-unaligned") == 0) {
+      asCoords    = false;
+      asHangs     = false;
+      asUnaligned = true;
+      asPAF       = false;
+      asBinary    = false;
+    }
+
+    else if (strcmp(argv[arg], "-paf") == 0) {
+      asCoords    = false;
+      asHangs     = false;
+      asUnaligned = false;
+      asPAF       = true;
+      asBinary    = false;
+    }
 
     else if (strcmp(argv[arg], "-binary") == 0) {
-      outPrefix = argv[++arg];
-      asBinary = true;
+      asCoords    = false;
+      asHangs     = false;
+      asUnaligned = false;
+      asPAF       = false;
+      asBinary    = true;
     }
 
-    else if (strcmp(argv[arg], "-counts") == 0)
-      asCounts = true;
 
-    else if (strcmp(argv[arg], "-eratelen") == 0)
-      asErateLen = true;
+    else if (strcmp(argv[arg], "-no5p") == 0)
+      params.no5p = true;
 
-    //  standard bulk dump options
-    else if (strcmp(argv[arg], "-E") == 0) {
-      dumpERate = atof(argv[++arg]);
-      dumpType |= WITH_ERATE;
-    }
+    else if (strcmp(argv[arg], "-no3p") == 0)
+      params.no3p = true;
 
-    else if (strcmp(argv[arg], "-L") == 0) {
-      dumpLength = atoi(argv[++arg]);
-      dumpType |= WITH_LENGTH;
-    }
+    else if (strcmp(argv[arg], "-nocontainer") == 0)
+      params.noContainer = true;
 
-    else if (strcmp(argv[arg], "-d5") == 0)
-      dumpType |= NO_5p;
+    else if (strcmp(argv[arg], "-nocontained") == 0)
+      params.noContained = true;
 
-    else if (strcmp(argv[arg], "-d3") == 0)
-      dumpType |= NO_3p;
+    else if (strcmp(argv[arg], "-noredundant") == 0)
+      params.noRedundant = true;
 
-    else if (strcmp(argv[arg], "-dC") == 0)
-      dumpType |= NO_CONTAINS;
+    else if (strcmp(argv[arg], "-query") == 0)
+      decodeRange(argv[++arg], params.queryMin, params.queryMax);
 
-    else if (strcmp(argv[arg], "-dc") == 0)
-      dumpType |= NO_CONTAINED;
+    else if (strcmp(argv[arg], "-erate") == 0)
+      decodeRange(argv[++arg], params.erateMin, params.erateMax);
 
-    else if (strcmp(argv[arg], "-v") == 0)
-      beVerbose = true;
+    else if (strcmp(argv[arg], "-length") == 0)
+      decodeRange(argv[++arg], params.lengthMin, params.lengthMax);
 
-    else if (strcmp(argv[arg], "-unique") == 0)
-      dumpType |= ONE_SIDED;
-
-    else if (strcmp(argv[arg], "-best") == 0)
-      bestPrefix = argv[++arg];
-
-    else if (strcmp(argv[arg], "-noc") == 0)
-      dumpType |= NO_CONTAINED_READS;
-
-    else if (strcmp(argv[arg], "-nos") == 0)
-      dumpType |= NO_SUSPICIOUS_READS;
-
-    else if (strcmp(argv[arg], "-nosi") == 0)
-      dumpType |= NO_SINGLETON_READS;
-
-    else if (strcmp(argv[arg], "-scores") == 0)
-      dumpType |= GLOBAL_SCORE;
+    else if (strcmp(argv[arg], "-bogart") == 0)
+      bogartPath = argv[++arg];
 
 
     else {
-      fprintf(stderr, "%s: unknown option '%s'.\n", argv[0], argv[arg]);
-      err++;
+      char *s = new char [1024];
+      snprintf(s, 1024, "%s: unknown option '%s'.\n", argv[0], argv[arg]);
+      err.push_back(s);
     }
 
     arg++;
   }
 
-  if (operation == OP_NONE)
-    err++;
-  if (gkpName == NULL)
-    err++;
+  if (seqName == NULL)
+    err.push_back("ERROR: no input seqStore (-S) supplied.\n");
+
   if (ovlName == NULL)
-    err++;
+    err.push_back("ERROR: no input ovlStore (-O) supplied.\n");
 
-  if (err) {
-    fprintf(stderr, "usage: %s -G gkpStore -O ovlStore ...\n", argv[0]);
+  if ((asBinary) && (outPrefix == NULL))
+    err.push_back("ERROR: -prefix is necessary for -binary output.\n");
+
+  if (err.size() > 0) {
+    fprintf(stderr, "usage: %s -S seqStore -O ovlStore ...\n", argv[0]);
+    fprintf(stderr, "  -S seqStore         mandatory path to a sequence store\n");
+    fprintf(stderr, "  -O ovlStore         mandatory path to an overlap store\n");
     fprintf(stderr, "\n");
-    fprintf(stderr, "There are three modes of operation:\n");
-    fprintf(stderr, "  -d [a[-b]] dump overlaps for reads a to b, inclusive\n");
-    fprintf(stderr, "  -q a b     report the a,b overlap, if it exists.\n");
-    fprintf(stderr, "  -p a       dump a picture of overlaps to fragment 'a'.\n");
+    fprintf(stderr, "WHAT TO DUMP:\n");
+    fprintf(stderr, "  Select what data to dump.  All take an optional read ID, or inclusive\n");
+    fprintf(stderr, "  range of read IDs, to dump.  Dumps are to stdout.\n");
     fprintf(stderr, "\n");
-    fprintf(stderr, "  CLEAR RANGE SELECTION\n");
-    fprintf(stderr, "    By default, will use the latest available.  To dump overlaps\n");
-    fprintf(stderr, "    from earlier stages, the clear range must be supplied.\n");
+    fprintf(stderr, "  -overlaps [b[-e]]   dump overlaps (default)\n");
+    fprintf(stderr, "  -picture  [b[-e]]   dump an ASCII picture of the overlaps relative to a read\n");
+    fprintf(stderr, "  -metadata [b[-3]]   tabular metadata, including the number of overlaps per read\n");
+    fprintf(stderr, "  -counts   [b[-e]]   the number of overlaps per read\n");
+    fprintf(stderr, "  -eratelen [b[-e]]   a histogram of overlap length vs error rate\n");
     fprintf(stderr, "\n");
-    fprintf(stderr, "  -raw\n");
-    fprintf(stderr, "  -obt\n");
-    fprintf(stderr, "  -utg\n");
+    fprintf(stderr, "  -prefix name        * for -eratelen, write histogram to name.dat\n");
+    fprintf(stderr, "                        and also output a gnuplot script to name.gp\n");
+    fprintf(stderr, "                      * for -binary, mandatory, write overlaps to name.ovb\n");
     fprintf(stderr, "\n");
-    fprintf(stderr, "  FORMAT (for -d)\n");
+    fprintf(stderr, "WHICH READ VERSION TO USE:\n");
     fprintf(stderr, "\n");
-    fprintf(stderr, "  -coords           dump overlap showing coordinates in the reads (default)\n");
-    fprintf(stderr, "  -hangs            dump overlap showing dovetail hangs unaligned\n");
-    fprintf(stderr, "  -raw              dump overlap showing its raw native format (four hangs)\n");
-    fprintf(stderr, "  -paf              dump overlaps in miniasm/minimap format\n");
-    fprintf(stderr, "  -binary prefix    dump overlap as raw binary data to file prefix.ovb and prefix.counts\n");
-    fprintf(stderr, "  -counts           dump the number of overlaps per read\n");
-    fprintf(stderr, "  -eratelen         dump a heatmap of error-rate vs overlap-length\n");
+    fprintf(stderr, "  -raw                uncorrected raw reads\n");
+    fprintf(stderr, "  -obt                corrected reads\n");
+    fprintf(stderr, "  -utg                trimmed reads\n");
     fprintf(stderr, "\n");
-    fprintf(stderr, "  MODIFIERS (for -d and -p)\n");
+    fprintf(stderr, "FORMAT OF -overlaps OUTPUT\n");
+    fprintf(stderr, "  NOTE!  Overlap type flags are only reported with -unaligned.\n");
     fprintf(stderr, "\n");
-    fprintf(stderr, "  -E erate          Dump only overlaps <= erate fraction error.\n");
-    fprintf(stderr, "  -L length         Dump only overlaps that are larger than L bases (only for -p picture mode).\n");
-    fprintf(stderr, "  -d5               Dump only overlaps off the 5' end of the A frag.\n");
-    fprintf(stderr, "  -d3               Dump only overlaps off the 3' end of the A frag.\n");
-    fprintf(stderr, "  -dC               Dump only overlaps that are contained in the A frag (B contained in A).\n");
-    fprintf(stderr, "  -dc               Dump only overlaps that are containing the A frag (A contained in B).\n");
-    fprintf(stderr, "  -v                Report statistics (to stderr) on some dumps (-d).\n");
-    fprintf(stderr, "  -unique           Report only overlaps where A id is < B id, do not report both A to B and B to A overlap\n");
+    fprintf(stderr, "  -coords             as coordinates on each read (default)\n");
+    fprintf(stderr, "  -hangs              as dovetail hangs\n");
+    fprintf(stderr, "  -unaligned          as unaligned regions on each read\n");
+    fprintf(stderr, "  -paf                as miniasm Pairwise mApping Format\n");
+    fprintf(stderr, "  -binary             as an overlapper output file (needs -prefix)\n");
     fprintf(stderr, "\n");
-    fprintf(stderr, "  -best prefix      Annotate picture with status from bogart outputs prefix.edges, prefix.singletons, prefix.edges.suspicious\n");
-    fprintf(stderr, "  -noc              With -best data, don't show overlaps to contained reads.\n");
-    fprintf(stderr, "  -nos              With -best data, don't show overlaps to suspicious reads.\n");
+    fprintf(stderr, "OVERLAP FILTERING\n");
     fprintf(stderr, "\n");
-    fprintf(stderr, "  -scores           Annotate picture with correction overlap score\n");
+    fprintf(stderr, "  -no5p               \n");
+    fprintf(stderr, "  -no3p               \n");
+    fprintf(stderr, "  -nocontainer        \n");
+    fprintf(stderr, "  -nocontained        \n");
+    fprintf(stderr, "  -noreduntant        \n");
+    fprintf(stderr, "  -query              \n");
+    fprintf(stderr, "  -erate              \n");
+    fprintf(stderr, "  -length             \n");
+    fprintf(stderr, "  -bogart             \n");
     fprintf(stderr, "\n");
 
-    if (operation == OP_NONE)
-      fprintf(stderr, "ERROR: no operation (-d, -q or -p) supplied.\n");
-    if (gkpName == NULL)
-      fprintf(stderr, "ERROR: no input gkpStore (-G) supplied.\n");
-    if (ovlName == NULL)
-      fprintf(stderr, "ERROR: no input ovlStore (-O) supplied.\n");
+    for (uint32 ii=0; ii<err.size(); ii++)
+      if (err[ii])
+        fputs(err[ii], stderr);
 
     exit(1);
   }
 
-  gkStore  *gkpStore = gkStore::gkStore_open(gkpName);
-  ovStore  *ovlStore = new ovStore(ovlName, gkpStore);
+  //
+  //  Open stores, allocate space to store overlaps.
+  //
 
-  if (endID > gkpStore->gkStore_getNumReads())
-    endID = gkpStore->gkStore_getNumReads();
+  sqStore   *seqStore = sqStore::sqStore_open(seqName);
+  ovStore   *ovlStore = new ovStore(ovlName, seqStore);
+
+  uint32     ovlLen   = 0;
+  uint32     ovlMax   = 65536;
+  ovOverlap *ovl      = ovOverlap::allocateOverlaps(seqStore, ovlMax);
+
+  //
+  //  Fix up ranges and restrict the overlaps.
+  //
+
+  if (endID > seqStore->sqStore_getNumReads())
+    endID = seqStore->sqStore_getNumReads();
 
   if (endID < bgnID)
-    fprintf(stderr, "ERROR: invalid bgn/end range bgn=%u end=%u; only %u reads in the store\n", bgnID, endID, gkpStore->gkStore_getNumReads()), exit(1);
+    fprintf(stderr, "ERROR: invalid bgn/end range bgn=%u end=%u; only %u reads in the store\n", bgnID, endID, seqStore->sqStore_getNumReads()), exit(1);
 
-  switch (operation) {
-    case OP_DUMP:
-      dumpStore(ovlStore,
-                gkpStore,
-                outPrefix,
-                asBinary, asCounts, asErateLen,
-                dumpERate,
-                dumpLength,
-                dumpType,
-                bgnID, endID, qryID,
-                type,
-                beVerbose,
-                bestPrefix);
-      break;
-    case OP_DUMP_PICTURE:
-      for (uint32 qq=bgnID; qq <= endID; qq++)
-        dumpPicture(ovlStore, gkpStore, dumpERate, dumpLength, dumpType, qq, bestPrefix, clearType);
-      break;
-    default:
-      break;
+  ovlStore->setRange(bgnID, endID);
+
+  //
+  //  Load bogart status.
+  //
+
+  params.loadBogartStatus(bogartPath, seqStore->sqStore_getNumReads());
+
+
+  //
+  //  If dumping metadata, no filtering is needed, just tell the store to dump.
+  //
+
+  if (asMetadata) {
+    ovlStore->dumpMetaData(bgnID, endID);
   }
 
-  delete ovlStore;
+  //
+  //  If dumping as counts, maybe we need to filter, maybe not.
+  //
 
-  gkpStore->gkStore_close();
+  if ((asCounts) && (params.parametersAreDefaults() == true)) {
+    uint32   *nopr = ovlStore->numOverlapsPerRead();
+
+    for (uint32 ii=bgnID; ii<=endID; ii++)
+      fprintf(stdout, "%u\t%u\n", ii, nopr[ii]);
+
+    delete [] nopr;
+  }
+
+  if ((asCounts) && (params.parametersAreDefaults() == false)) {
+    uint32   *nopr = new uint32 [seqStore->sqStore_getNumReads() + 1];
+
+    ovlLen = ovlStore->loadBlockOfOverlaps(ovl, ovlMax);
+
+    while (ovlLen > 0) {
+      for (uint32 oo=0; oo<ovlLen; oo++) {
+        if (params.filterOverlap(ovl + oo) == true)
+          continue;
+
+        nopr[ovl[oo].a_iid]++;
+        //nopr[ovl[oo].b_iid]++;
+      }
+
+      ovlLen = ovlStore->loadBlockOfOverlaps(ovl, ovlMax);
+    }
+
+    for (uint32 ii=bgnID; ii<=endID; ii++)
+      fprintf(stdout, "%u\t%u\n", ii, nopr[ii]);
+
+    delete [] nopr;
+  }
+
+  //
+  //  If as erate-v-length, again, maybe, maybe not.
+  //
+
+  if (asErateLen) {
+    ovStoreHistogram *hist;
+
+    //  If all defaults, load the histogram from disk.  Otherwise,
+    //  read all the overlaps and generate a new histogram.
+
+    if (params.parametersAreDefaults() == true) {
+      hist = ovlStore->getHistogram();
+    }
+
+    else {
+      hist = new ovStoreHistogram(seqStore);
+
+      ovlLen = ovlStore->loadBlockOfOverlaps(ovl, ovlMax);
+
+      while (ovlLen > 0) {
+        for (uint32 oo=0; oo<ovlLen; oo++) {
+          if (params.filterOverlap(ovl + oo) == true)
+            continue;
+
+          hist->addOverlap(ovl + oo);
+        }
+
+        ovlLen = ovlStore->loadBlockOfOverlaps(ovl, ovlMax);
+      }
+
+      hist->dumpEvalueLength(stdout);
+    }
+
+    //  If no outPrefix, dump the histogram to stdout.
+    //  Otherwise, dump to a file and emit a gnuplot script.
+
+    if (outPrefix == NULL) {
+      hist->dumpEvalueLength(stdout);
+    }
+
+    else {
+
+      FILE *D = AS_UTL_openOutputFile(outPrefix, '.', "dat");
+      hist->dumpEvalueLength(D);
+      AS_UTL_closeFile(D, outPrefix, '.', "dat");
+
+      FILE *G = AS_UTL_openOutputFile(outPrefix, '.', "gp");
+      fprintf(G, "unset key\n");
+      fprintf(G, "set tic scale 0\n");
+      fprintf(G, "\n");
+      fprintf(G, "set palette defined(\\\n");
+      fprintf(G, "0       0.2314  0.2980  0.7529,\\\n");
+      fprintf(G, "0.03125 0.2667  0.3529  0.8000,\\\n");
+      fprintf(G, "0.0625  0.3020  0.4078  0.8431,\\\n");
+      fprintf(G, "0.09375 0.3412  0.4588  0.8824,\\\n");
+      fprintf(G, "0.125   0.3843  0.5098  0.9176,\\\n");
+      fprintf(G, "0.15625 0.4235  0.5569  0.9451,\\\n");
+      fprintf(G, "0.1875  0.4667  0.6039  0.9686,\\\n");
+      fprintf(G, "0.21875 0.5098  0.6471  0.9843,\\\n");
+      fprintf(G, "0.25    0.5529  0.6902  0.9961,\\\n");
+      fprintf(G, "0.28125 0.5961  0.7255  1.0000,\\\n");
+      fprintf(G, "0.3125  0.6392  0.7608  1.0000,\\\n");
+      fprintf(G, "0.34375 0.6824  0.7882  0.9922,\\\n");
+      fprintf(G, "0.375   0.7216  0.8157  0.9765,\\\n");
+      fprintf(G, "0.40625 0.7608  0.8353  0.9569,\\\n");
+      fprintf(G, "0.4375  0.8000  0.8510  0.9333,\\\n");
+      fprintf(G, "0.46875 0.8353  0.8588  0.9020,\\\n");
+      fprintf(G, "0.5     0.8667  0.8667  0.8667,\\\n");
+      fprintf(G, "0.53125 0.8980  0.8471  0.8196,\\\n");
+      fprintf(G, "0.5625  0.9255  0.8275  0.7725,\\\n");
+      fprintf(G, "0.59375 0.9451  0.8000  0.7255,\\\n");
+      fprintf(G, "0.625   0.9608  0.7686  0.6784,\\\n");
+      fprintf(G, "0.65625 0.9686  0.7333  0.6275,\\\n");
+      fprintf(G, "0.6875  0.9686  0.6941  0.5804,\\\n");
+      fprintf(G, "0.71875 0.9686  0.6510  0.5294,\\\n");
+      fprintf(G, "0.75    0.9569  0.6039  0.4824,\\\n");
+      fprintf(G, "0.78125 0.9451  0.5529  0.4353,\\\n");
+      fprintf(G, "0.8125  0.9255  0.4980  0.3882,\\\n");
+      fprintf(G, "0.84375 0.8980  0.4392  0.3451,\\\n");
+      fprintf(G, "0.875   0.8706  0.3765  0.3020,\\\n");
+      fprintf(G, "0.90625 0.8353  0.3137  0.2588,\\\n");
+      fprintf(G, "0.9375  0.7961  0.2431  0.2196,\\\n");
+      fprintf(G, "0.96875 0.7529  0.1569  0.1843,\\\n");
+      fprintf(G, "1       0.7059  0.0157  0.1490\\\n");
+      fprintf(G, ")\n");
+      fprintf(G, "\n");
+      fprintf(G, "set format cb '%%5.0f'\n");
+      fprintf(G, "set colorbox user size .03, .6 noborder\n");
+      fprintf(G, "set cbtics scale 0\n");
+      fprintf(G, "set cblabel 'NumOlaps'\n");
+      fprintf(G, "\n");
+      fprintf(G, "set xlabel 'Overlap Length'\n");
+      fprintf(G, "set ylabel 'Error Rate'\n");
+      fprintf(G, "\n");
+      fprintf(G, "set view map\n");
+      fprintf(G, "\n");
+      fprintf(G, "set terminal 'png' size 1024,1024\n");
+      fprintf(G, "set output '%s.png'\n", outPrefix);
+      fprintf(G, "\n");
+      fprintf(G, "plot [0:" F_U32 "] [0:%.3f] '%s.dat' using 1:2:3 with image\n",
+              hist->maxLength(),
+              hist->maxErate(),
+              outPrefix);
+
+      AS_UTL_closeFile(G, outPrefix, '.', "gp");
+    }
+
+    //  All dumped!  Delete the data.
+
+    delete hist;
+  }
+
+
+  //
+  //  But if dumping actual overlaps, we've got to filter, and
+  //  change the output format willy nilly.
+  //
+
+  if (asOverlaps) {
+    char     binaryName[FILENAME_MAX + 1];
+    ovFile  *binaryFile = NULL;
+
+    if (asBinary) {
+      snprintf(binaryName, FILENAME_MAX, "%s.ovb", outPrefix);
+
+      binaryFile = new ovFile(seqStore, binaryName, ovFileFullWrite);
+    }
+
+    ovlLen = ovlStore->loadBlockOfOverlaps(ovl, ovlMax);
+
+    while (ovlLen > 0) {
+      for (uint32 oo=0; oo<ovlLen; oo++) {
+        if (params.filterOverlap(ovl + oo) == true)
+          continue;
+
+        if      (asCoords) {
+          fputs(ovl[oo].toString(ovlString, ovOverlapAsCoords, true), stdout);
+        }
+
+        else if (asHangs) {
+          fputs(ovl[oo].toString(ovlString, ovOverlapAsHangs, true), stdout);
+        }
+
+        else if (asUnaligned) {
+          fputs(ovl[oo].toString(ovlString, ovOverlapAsUnaligned, true), stdout);
+        }
+
+        else if (asPAF) {
+          fputs(ovl[oo].toString(ovlString, ovOverlapAsPaf, true), stdout);
+        }
+
+        else if (asBinary) {
+          binaryFile->writeOverlap(&ovl[oo]);
+        }
+
+        else {
+        }
+      }
+
+      ovlLen = ovlStore->loadBlockOfOverlaps(ovl, ovlMax);
+    }
+
+    if (asBinary)
+      delete binaryFile;
+  }
+
+  //
+  //  If as a picture, we need to build a list of the overlaps to show,
+  //  then draw the picture.
+  //
+
+  if (asPicture) {
+    for (uint32 rr=bgnID; rr<=endID; rr++) {
+      uint32  ovlSav = 0;
+
+      ovlLen = ovlStore->loadOverlapsForRead(rr, ovl, ovlMax);
+
+      for (uint32 oo=0; oo<ovlLen; oo++)
+        if (params.filterOverlap(ovl + oo) == false)   //  If not filtered,
+          ovl[ovlSav++] = ovl[oo];                     //  save the overlap for drawing
+
+      if (ovlSav > 0)
+        params.drawPicture(rr, ovl, ovlSav, seqStore, withScores);
+    }
+  }
+
+  //
+  //  Phew, that was a lot of work.
+  //
+
+  delete [] ovl;
+  delete    ovlStore;
+
+  seqStore->sqStore_close();
 
   exit(0);
 }

@@ -43,13 +43,18 @@ require Exporter;
 @EXPORT = qw(mhapConfigure mhapPrecomputeCheck mhapCheck);
 
 use strict;
+use warnings "all";
+no  warnings "uninitialized";
 use POSIX qw(floor);
 
 use File::Path 2.08 qw(make_path remove_tree);
 
 use canu::Defaults;
 use canu::Execution;
-use canu::Gatekeeper;
+
+use canu::SequenceStore;
+use canu::Report;
+
 use canu::Grid_Cloud;
 
 #  Map long reads to long reads with mhap.
@@ -77,7 +82,6 @@ sub mhapConfigure ($$$) {
 
     caFailure("invalid type '$typ'", undef)  if (($typ ne "partial") && ($typ ne "normal"));
 
-    goto allDone   if (skipStage($asm, "$tag-mhapConfigure") == 1);
     goto allDone   if (fileExists("$path/precompute.sh")) && (fileExists("$path/mhap.sh"));
     goto allDone   if (fileExists("$path/ovljob.files"));
     goto allDone   if (-e "$base/$asm.ovlStore");
@@ -140,7 +144,7 @@ sub mhapConfigure ($$$) {
 
     # due to systematic bias in nanopore data, adjust threshold up by 5%
     my $numNanoporeRaw = 0;
-    open(L, "< $base/$asm.gkpStore/libraries.txt") or caExit("can't open '$base/$asm.gkpStore/libraries.txt' for reading: $!", undef);
+    open(L, "< ./$asm.seqStore/libraries.txt") or caExit("can't open './$asm.seqStore/libraries.txt' for reading: $!", undef);
     while (<L>) {
         $numNanoporeRaw++         if (m/nanopore-raw/);
     }
@@ -154,12 +158,13 @@ sub mhapConfigure ($$$) {
 
     my $merSize       = getGlobal("${tag}MhapMerSize");
 
-    my $numReads      = getNumberOfReadsEarliestVersion($asm);   #  Need to iterate over all read IDs!
-    my $memorySize    = getGlobal("${tag}mhapMemory");
+    my $numReads      = getNumberOfReadsInStore($asm, "all");   #  Need to iterate over all read IDs!
+    my $memorySize    = getGlobal("${tag}mhapMemory") * 0.9;
     my $blockPerGb    = getGlobal("${tag}MhapBlockSize") / (($numHashes < 768) ? 1 : 2);
 
     my $javaPath      = getGlobal("java");
-    my $javaMemory    = int(getGlobal("${tag}mhapMemory") * 1024 + 0.5);
+    my $javaOpt       = "-d64" if (defined(getGlobal("javaUse64Bit")) && getGlobal("javaUse64Bit") == 1);
+    my $javaMemory    = int(getGlobal("${tag}mhapMemory") * 1024 * 0.9 + 0.5);
 
     print STDERR "--\n";
     print STDERR "-- PARAMETERS: hashes=$numHashes, minMatches=$minNumMatches, threshold=$threshold\n";
@@ -290,7 +295,7 @@ sub mhapConfigure ($$$) {
     runCommandSilently($path, "tar -cf queries.tar queries", 1);
     stashFile("$path/queries.tar");
 
-    #  Create a script to generate precomputed blocks, including extracting the reads from gkpStore.
+    #  Create a script to generate precomputed blocks, including extracting the reads from seqStore.
 
     #OPTIMIZE
     #OPTIMIZE  Probably a big optimization for cloud assemblies, the block fasta inputs can be
@@ -307,7 +312,7 @@ sub mhapConfigure ($$$) {
     print F getBinDirectoryShellCode();
     print F "\n";
     print F setWorkDirectoryShellCode($path);
-    print F fetchStoreShellCode("$base/$asm.gkpStore", "$base/1-overlapper", "");
+    print F fetchSeqStoreShellCode($asm, $path, "");
     print F "\n";
     print F getJobIDShellCode();
     print F "\n";
@@ -328,7 +333,8 @@ sub mhapConfigure ($$$) {
     print F "  mkdir -p ./blocks\n";
     print F "fi\n";
     print F "\n";
-    print F fileExistsShellCode("./blocks/\$job.dat");
+    print F fileExistsShellCode("exists", "$path", "blocks/\$job.dat");
+    print F "if [ \$exists = true ] ; then\n";
     print F "  echo Job previously completed successfully.\n";
     print F "  exit\n";
     print F "fi\n";
@@ -336,10 +342,8 @@ sub mhapConfigure ($$$) {
     print F "#  Remove any previous result.\n";
     print F "rm -f ./blocks/\$job.input.dat\n";
     print F "\n";
-    #print F fetchFileShellCode("./blocks/\$job.input.fasta");
-    print F "\n";
-    print F "\$bin/gatekeeperDumpFASTQ \\\n";
-    print F "  -G ../$asm.gkpStore \\\n";
+    print F "\$bin/sqStoreDumpFASTQ \\\n";
+    print F "  -S ../../$asm.seqStore \\\n";
     print F "  \$rge \\\n";
     print F "  -nolibname \\\n";
     print F "  -noreadname \\\n";
@@ -354,7 +358,7 @@ sub mhapConfigure ($$$) {
     print F "  exit 1\n";
     print F "fi\n";
     print F "\n";
-    print F fetchFileShellCode("$base/0-mercounts", "$asm.ms$merSize.frequentMers.ignore.gz", "");
+    print F fetchFileShellCode("$base/0-mercounts", "$asm.ms$merSize.ignore.gz", "");
     print F "\n";
     print F "echo \"\"\n";
     print F "echo Starting mhap precompute.\n";
@@ -363,7 +367,7 @@ sub mhapConfigure ($$$) {
     print F "#  So mhap writes its output in the correct spot.\n";
     print F "cd ./blocks\n";
     print F "\n";
-    print F "$javaPath -d64 -server -Xmx", $javaMemory, "m \\\n";
+    print F "$javaPath $javaOpt -XX:ParallelGCThreads=",  getGlobal("${tag}mhapThreads"), " -server -Xms", $javaMemory, "m -Xmx", $javaMemory, "m \\\n";
     print F "  -jar $cygA \$bin/../share/java/classes/mhap-" . getGlobal("${tag}MhapVersion") . ".jar $cygB \\\n";
     print F "  --repeat-weight 0.9 --repeat-idf-scale 10 -k $merSize \\\n";
     print F "  --supress-noise 2 \\\n"  if (defined(getGlobal("${tag}MhapFilterUnique")) && getGlobal("${tag}MhapFilterUnique") == 1);
@@ -378,7 +382,7 @@ sub mhapConfigure ($$$) {
     print F "  --min-olap-length ", getGlobal("minOverlapLength"), " \\\n";
     print F "  --num-threads ", getGlobal("${tag}mhapThreads"), " \\\n";
     print F " " . getGlobal("${tag}MhapOptions")         . " \\\n"   if (defined(getGlobal("${tag}MhapOptions")));
-    print F "  -f $cygA ../../0-mercounts/$asm.ms$merSize.frequentMers.ignore.gz $cygB \\\n"   if (-e "$base/0-mercounts/$asm.ms$merSize.frequentMers.ignore.gz");
+    print F "  -f $cygA ../../0-mercounts/$asm.ms$merSize.ignore.gz $cygB \\\n"   if (-e "$base/0-mercounts/$asm.ms$merSize.ignore.gz");
     print F "  -p $cygA ./\$job.input.fasta $cygB \\\n";
     print F "  -q $cygA . $cygB \\\n";
     print F "&& \\\n";
@@ -407,7 +411,7 @@ sub mhapConfigure ($$$) {
     print F getBinDirectoryShellCode();
     print F "\n";
     print F setWorkDirectoryShellCode($path);
-    print F fetchStoreShellCode("$base/$asm.gkpStore", "$base/1-overlapper", "");
+    print F fetchSeqStoreShellCode($asm, $path, "");
     print F "\n";
     print F getJobIDShellCode();
     print F "\n";
@@ -463,7 +467,7 @@ sub mhapConfigure ($$$) {
     print F "echo \"\"\n";
     print F "\n";
     print F "if [ ! -e ./results/\$qry.mhap ] ; then\n";
-    print F "  $javaPath -d64 -server -Xmx", $javaMemory, "m \\\n";
+    print F "  $javaPath $javaOpt -XX:ParallelGCThreads=",  getGlobal("${tag}mhapThreads"), " -server -Xms", $javaMemory, "m -Xmx", $javaMemory, "m \\\n";
     print F "    -jar $cygA \$bin/../share/java/classes/mhap-" . getGlobal("${tag}MhapVersion") . ".jar $cygB \\\n";
     print F "    --repeat-weight 0.9 --repeat-idf-scale 10 -k $merSize \\\n";
     print F "    --supress-noise 2 \\\n"  if (defined(getGlobal("${tag}MhapFilterUnique")) && getGlobal("${tag}MhapFilterUnique") == 1);
@@ -489,7 +493,7 @@ sub mhapConfigure ($$$) {
     print F "if [   -e ./results/\$qry.mhap -a \\\n";
     print F "     ! -e ./results/\$qry.ovb ] ; then\n";
     print F "  \$bin/mhapConvert \\\n";
-    print F "    -G ../$asm.gkpStore \\\n";
+    print F "    -S ../../$asm.seqStore \\\n";
     print F "    -o ./results/\$qry.mhap.ovb.WORKING \\\n";
     print F "    ./results/\$qry.mhap \\\n";
     print F "  && \\\n";
@@ -497,7 +501,7 @@ sub mhapConfigure ($$$) {
     print F "fi\n";
     print F "\n";
 
-    if (getGlobal('saveOverlaps') eq "0") {
+    if (getGlobal('saveOverlaps') ne "1") {
         print F "if [   -e ./results/\$qry.mhap -a \\\n";
         print F "       -e ./results/\$qry.mhap.ovb ] ; then\n";
         print F "  rm -f ./results/\$qry.mhap\n";
@@ -508,7 +512,7 @@ sub mhapConfigure ($$$) {
     if (getGlobal("${tag}ReAlign") eq "1") {
         print F "if [ -e ./results/\$qry.mhap.ovb ] ; then\n";
         print F "  \$bin/overlapPair \\\n";
-        print F "    -G ../$asm.gkpStore \\\n";
+        print F "    -S ../../$asm.seqStore \\\n";
         print F "    -O ./results/\$qry.mhap.ovb \\\n";
         print F "    -o ./results/\$qry.WORKING.ovb \\\n";
         print F "    -partial \\\n"  if ($typ eq "partial");
@@ -528,8 +532,8 @@ sub mhapConfigure ($$$) {
     }
 
     print F "\n";
-    print F stashFileShellCode("$path", "results/\$qry.ovb",    "");
-    print F stashFileShellCode("$path", "results/\$qry.counts", "");
+    print F stashFileShellCode("$path", "results/\$qry.ovb", "");
+    print F stashFileShellCode("$path", "results/\$qry.oc",  "");
     print F "\n";
     print F "exit 0\n";
 
@@ -564,7 +568,8 @@ sub mhapConfigure ($$$) {
     stashFile("$path/mhap.sh");
 
   finishStage:
-    emitStage($asm, "$tag-mhapConfigure");
+    generateReport($asm);
+    resetIteration("$tag-mhapConfigure");
 
   allDone:
     stopAfter("overlapConfigure");
@@ -588,7 +593,6 @@ sub mhapPrecomputeCheck ($$$) {
 
     $path = "$base/1-overlapper";
 
-    goto allDone   if (skipStage($asm, "$tag-mhapPrecomputeCheck", $attempt) == 1);
     goto allDone   if (fileExists("$path/precompute.files"));
     goto allDone   if (-e "$base/$asm.ovlStore");
     goto allDone   if (fileExists("$base/$asm.ovlStore.tar"));
@@ -640,7 +644,7 @@ sub mhapPrecomputeCheck ($$$) {
 
         #  Otherwise, run some jobs.
 
-        emitStage($asm, "$tag-mhapPrecomputeCheck", $attempt);
+        generateReport($asm);
 
         submitOrRunParallelJob($asm, "${tag}mhap", $path, "precompute", @failedJobs);
         return;
@@ -655,7 +659,8 @@ sub mhapPrecomputeCheck ($$$) {
 
     stashFile("$path/precompute.files");
 
-    emitStage($asm, "$tag-mhapPrecomputeCheck");
+    generateReport($asm);
+    resetIteration("$tag-mhapPrecomputeCheck");
 
   allDone:
 }
@@ -680,7 +685,6 @@ sub mhapCheck ($$$) {
 
     $path = "$base/1-overlapper";
 
-    goto allDone   if (skipStage($asm, "$tag-mhapCheck", $attempt) == 1);
     goto allDone   if (fileExists("$path/mhap.files"));
     goto allDone   if (-e "$base/$asm.ovlStore");
     goto allDone   if (fileExists("$base/$asm.ovlStore.tar"));
@@ -703,25 +707,25 @@ sub mhapCheck ($$$) {
                 push @mhapJobs,    "1-overlapper/results/$1.mhap\n";
                 push @successJobs, "1-overlapper/results/$1.ovb.gz\n";
                 push @miscJobs,    "1-overlapper/results/$1.stats\n";
-                push @miscJobs,    "1-overlapper/results/$1.counts\n";
+                push @miscJobs,    "1-overlapper/results/$1.oc\n";
 
             } elsif (fileExists("$path/results/$1.ovb")) {
                 push @mhapJobs,    "1-overlapper/results/$1.mhap\n";
                 push @successJobs, "1-overlapper/results/$1.ovb\n";
                 push @miscJobs,    "1-overlapper/results/$1.stats\n";
-                push @miscJobs,    "1-overlapper/results/$1.counts\n";
+                push @miscJobs,    "1-overlapper/results/$1.oc\n";
 
             } elsif (fileExists("$path/results/$1.ovb.bz2")) {
                 push @mhapJobs,    "1-overlapper/results/$1.mhap\n";
                 push @successJobs, "1-overlapper/results/$1.ovb.bz2\n";
                 push @miscJobs,    "1-overlapper/results/$1.stats\n";
-                push @miscJobs,    "1-overlapper/results/$1.counts\n";
+                push @miscJobs,    "1-overlapper/results/$1.oc\n";
 
             } elsif (fileExists("$path/results/$1.ovb.xz")) {
                 push @mhapJobs,    "1-overlapper/results/$1.mhap\n";
                 push @successJobs, "1-overlapper/results/$1.ovb.xz\n";
                 push @miscJobs,    "1-overlapper/results/$1.stats\n";
-                push @miscJobs,    "1-overlapper/results/$1.counts\n";
+                push @miscJobs,    "1-overlapper/results/$1.oc\n";
 
             } else {
                 $failureMessage .= "--   job $path/results/$1.ovb FAILED.\n";
@@ -765,7 +769,8 @@ sub mhapCheck ($$$) {
 
         #  Otherwise, run some jobs.
 
-        emitStage($asm, "$tag-mhapCheck", $attempt);
+        generateReport($asm);
+
         submitOrRunParallelJob($asm, "${tag}mhap", $path, "mhap", @failedJobs);
         return;
     }
@@ -789,7 +794,8 @@ sub mhapCheck ($$$) {
     stashFile("$path/ovljob.files");
     stashFile("$path/ovljob.more.files");
 
-    emitStage($asm, "$tag-mhapCheck");
+    generateReport($asm);
+    resetIteration("$tag-mhapCheck");
 
   allDone:
     stopAfter("overlap");

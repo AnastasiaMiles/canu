@@ -23,6 +23,10 @@
  *      are Copyright 2015 Battelle National Biodefense Institute, and
  *      are subject to the BSD 3-Clause License
  *
+ *    Brian P. Walenz beginning on 2018-JUL-21
+ *      are a 'United States Government Work', and
+ *      are released in the public domain
+ *
  *  File 'README.licenses' in the root directory of this distribution contains
  *  full conditions and disclaimers for each license.
  */
@@ -36,7 +40,7 @@
 
 #include "NDalgorithm.H"
 
-#include "AS_UTL_reverseComplement.H"
+#include "sequence.H"
 
 #include <map>
 #include <vector>

@@ -15,11 +15,37 @@
  *
  *  This file is derived from:
  *
+ *    src/AS_OVS/AS_OVS_overlapStore.C
+ *    src/AS_OVS/AS_OVS_overlapStore.c
  *    src/stores/ovStore.C
  *
  *  Modifications by:
  *
- *    Brian P. Walenz beginning on 2016-OCT-28
+ *    Brian P. Walenz from 2007-MAR-08 to 2013-AUG-01
+ *      are Copyright 2007-2013 J. Craig Venter Institute, and
+ *      are subject to the GNU General Public License version 2
+ *
+ *    Sergey Koren on 2007-MAY-08
+ *      are Copyright 2007 J. Craig Venter Institute, and
+ *      are subject to the GNU General Public License version 2
+ *
+ *    Sergey Koren from 2011-JUN-02 to 2011-JUN-03
+ *      are Copyright 2011 Battelle National Biodefense Institute, and
+ *      are subject to the BSD 3-Clause License
+ *
+ *    Gregory Sims from 2012-FEB-01 to 2012-FEB-14
+ *      are Copyright 2012 J. Craig Venter Institute, and
+ *      are subject to the GNU General Public License version 2
+ *
+ *    Brian P. Walenz from 2014-DEC-09 to 2015-AUG-14
+ *      are Copyright 2014-2015 Battelle National Biodefense Institute, and
+ *      are subject to the BSD 3-Clause License
+ *
+ *    Brian P. Walenz beginning on 2015-OCT-12
+ *      are a 'United States Government Work', and
+ *      are released in the public domain
+ *
+ *    Sergey Koren beginning on 2015-DEC-15
  *      are a 'United States Government Work', and
  *      are released in the public domain
  *
@@ -36,36 +62,38 @@
 
 
 
-ovStoreFilter::ovStoreFilter(gkStore *gkp_, double maxErate) {
-  gkp             = gkp_;
-  maxID           = gkp->gkStore_getNumReads() + 1;
-  maxEvalue       = AS_OVS_encodeEvalue(maxErate);
+ovStoreFilter::ovStoreFilter(sqStore *seq_, double maxErate_, bool beVerbose_) {
+  seq             = seq_;
+  maxID           = seq->sqStore_getNumReads();
+  maxEvalue       = AS_OVS_encodeEvalue(maxErate_);
+
+  beVerbose       = beVerbose_;
 
   resetCounters();
 
-  skipReadOBT     = new char [maxID];
-  skipReadDUP     = new char [maxID];
+  skipReadOBT     = new char [maxID + 1];
+  skipReadDUP     = new char [maxID + 1];
 
   uint32  numSkipOBT = 0;
   uint32  numSkipDUP = 0;
 
-  for (uint64 iid=0; iid<maxID; iid++) {
-    uint32     Lid = gkp->gkStore_getRead(iid)->gkRead_libraryID();
-    gkLibrary *L   = gkp->gkStore_getLibrary(Lid);
+  for (uint64 iid=0; iid<=maxID; iid++) {
+    uint32     Lid = seq->sqStore_getRead(iid)->sqRead_libraryID();
+    sqLibrary *L   = seq->sqStore_getLibrary(Lid);
 
     skipReadOBT[iid] = false;
     skipReadDUP[iid] = false;
 
-    if ((L->gkLibrary_removeDuplicateReads()     == false) &&
-        (L->gkLibrary_finalTrim()                == GK_FINALTRIM_NONE) &&
-        (L->gkLibrary_removeSpurReads()          == false) &&
-        (L->gkLibrary_removeChimericReads()      == false) &&
-        (L->gkLibrary_checkForSubReads()         == false)) {
+    if ((L->sqLibrary_removeDuplicateReads()     == false) &&
+        (L->sqLibrary_finalTrim()                == SQ_FINALTRIM_NONE) &&
+        (L->sqLibrary_removeSpurReads()          == false) &&
+        (L->sqLibrary_removeChimericReads()      == false) &&
+        (L->sqLibrary_checkForSubReads()         == false)) {
       numSkipOBT++;
       skipReadOBT[iid] = true;
     }
 
-    if (L->gkLibrary_removeDuplicateReads() == false) {
+    if (L->sqLibrary_removeDuplicateReads() == false) {
       numSkipDUP++;
       skipReadDUP[iid] = true;
     }
@@ -130,12 +158,20 @@ void
 ovStoreFilter::filterOverlap(ovOverlap       &foverlap,
                              ovOverlap       &roverlap) {
 
+  //  GREATLY annoy the poor user that asked for 'overly verbose' mode.
+
+  if (beVerbose) {
+    char ovlstr[256];
+
+    fprintf(stderr, "%s\n", foverlap.toString(ovlstr, ovOverlapAsUnaligned, false));
+  }
+
   //  Quick sanity check on IIDs.
 
   if ((foverlap.a_iid == 0) ||
       (foverlap.b_iid == 0) ||
-      (foverlap.a_iid >= maxID) ||
-      (foverlap.b_iid >= maxID)) {
+      (foverlap.a_iid > maxID) ||
+      (foverlap.b_iid > maxID)) {
     char ovlstr[256];
 
     fprintf(stderr, "Overlap has IDs out of range (maxID " F_U32 "), possibly corrupt input data.\n", maxID);
@@ -164,7 +200,7 @@ ovStoreFilter::filterOverlap(ovOverlap       &foverlap,
   }
 
   //  Ignore opposite oriented overlaps
-#if 0
+#ifdef IGNORE_FLIPPED_OVERLAPS
   if ((foverlap.flipped() == true)) {
     foverlap.dat.ovl.forUTG = false;
     foverlap.dat.ovl.forOBT = false;
@@ -252,7 +288,7 @@ ovStoreFilter::filterOverlap(ovOverlap       &foverlap,
 
   if (((foverlap.dat.ovl.forDUP == true) ||
        (roverlap.dat.ovl.forDUP == true)) &&
-      (gkp->gkStore_getRead(foverlap.a_iid)->gkRead_libraryID() != gkp->gkStore_getRead(foverlap.b_iid)->gkRead_libraryID())) {
+      (seq->sqStore_getRead(foverlap.a_iid)->sqRead_libraryID() != seq->sqStore_getRead(foverlap.b_iid)->sqRead_libraryID())) {
 
     if ((foverlap.dat.ovl.forDUP == true)) {
       foverlap.dat.ovl.forDUP = false;

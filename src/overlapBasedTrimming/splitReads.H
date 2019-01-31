@@ -19,6 +19,10 @@
  *      are Copyright 2015 Battelle National Biodefense Institute, and
  *      are subject to the BSD 3-Clause License
  *
+ *    Brian P. Walenz beginning on 2018-APR-18
+ *      are a 'United States Government Work', and
+ *      are released in the public domain
+ *
  *  File 'README.licenses' in the root directory of this distribution contains
  *  full conditions and disclaimers for each license.
  */
@@ -28,15 +32,13 @@
 
 #include "AS_global.H"
 
-#include "gkStore.H"
+#include "sqStore.H"
 #include "ovStore.H"
 
 #include "adjustOverlaps.H"
 #include "clearRangeFile.H"
 
 #include "intervalList.H"
-
-#include "AS_UTL_decodeRange.H"
 
 #include <vector>
 #include <map>
@@ -176,7 +178,7 @@ public:
     //adj         = NULL;
   };
 
-  void          addAndFilterOverlaps(gkStore *gkp,
+  void          addAndFilterOverlaps(sqStore *seq,
                                      clearRangeFile *finClr,
                                      double errorRate,
                                      ovOverlap *ovl, uint32 ovlLen);
@@ -219,25 +221,25 @@ public:
 
 
 void
-detectSpur(gkStore               *gkp,
+detectSpur(sqStore               *seq,
            workUnit              *w,
            FILE                  *subreadFile,
            bool                   subreadFileVerbose);
 
 void
-detectChimer(gkStore               *gkp,
+detectChimer(sqStore               *seq,
              workUnit              *w,
              FILE                  *subreadFile,
              bool                   subreadFileVerbose);
 
 void
-detectSubReads(gkStore               *gkp,
+detectSubReads(sqStore               *seq,
                workUnit              *w,
                FILE                  *subreadFile,
                bool                   subreadFileVerbose);
 
 void
-trimBadInterval(gkStore               *gkp,
+trimBadInterval(sqStore               *seq,
                 workUnit              *w,
                 uint32                 minReadLength,
                 FILE                  *subreadFile,

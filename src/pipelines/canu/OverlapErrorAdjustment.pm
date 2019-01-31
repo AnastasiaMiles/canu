@@ -43,13 +43,17 @@ require Exporter;
 @EXPORT = qw(readErrorDetectionConfigure readErrorDetectionCheck overlapErrorAdjustmentConfigure overlapErrorAdjustmentCheck updateOverlapStore);
 
 use strict;
+use warnings "all";
+no  warnings "uninitialized";
 
 use File::Path 2.08 qw(make_path remove_tree);
 
 use canu::Defaults;
 use canu::Execution;
-use canu::Gatekeeper;
+
+use canu::SequenceStore;
 use canu::Report;
+
 use canu::Grid_Cloud;
 
 #  Hardcoded to use utgOvlErrorRate
@@ -58,9 +62,13 @@ use canu::Grid_Cloud;
 sub loadReadLengthsAndNumberOfOverlaps ($$$$) {
     my $asm     = shift @_;
     my $maxID   = shift @_;
+
     my $rlVec   = shift @_;
+    my $rlCnt   = 0;
     my $rlSum   = 0;
+
     my $noVec   = shift @_;
+    my $noCnt   = 0;
     my $noSum   = 0;
 
     my $bin     = getBinDirectory();
@@ -71,34 +79,43 @@ sub loadReadLengthsAndNumberOfOverlaps ($$$$) {
     print STDERR "--\n";
     print STDERR "-- Loading read lengths.\n";
 
-    open(F, "$bin/gatekeeperDumpMetaData -G unitigging/$asm.gkpStore -reads |");
+    open(F, "$bin/sqStoreDumpMetaData -S ./$asm.seqStore -reads 2> /dev/null |");
     while (<F>) {
         s/^\s+//;
         s/\s+$//;
+
+        next if (m/^readID/);   #  Header line
+        next if (m/^------/);   #  ------ ----
+
         my @v = split '\s+', $_;
+
         vec($$rlVec, $v[0], 32) = $v[2];
+        $rlCnt                 += 1;
         $rlSum                 += $v[2];
     }
     close(F);
 
-    caExit("Failed to load read lengths from '$asm.gkpStore'", undef)   if ($rlSum == 0);
+    caExit("Failed to load read lengths from '$asm.seqStore'", undef)   if ($rlCnt == 0);
 
 
-    fetchStore("unitigging/$asm.ovlStore");
+    fetchOvlStore($asm, "unitigging");
 
     print STDERR "-- Loading number of overlaps per read.\n";
 
-    open(F, "$bin/ovStoreDump -G unitigging/$asm.gkpStore -O unitigging/$asm.ovlStore -d -counts |");
+    open(F, "$bin/ovStoreDump -S ./$asm.seqStore -O ./unitigging/$asm.ovlStore -counts 2> /dev/null |");
     while (<F>) {
         s/^\s+//;
         s/\s+$//;
+
         my @v = split '\s+', $_;
+
         vec($$noVec, $v[0], 32) = $v[1];
+        $noCnt                 += 1;
         $noSum                 += $v[1];
     }
     close(F);
 
-    caExit("Failed to load number of overlaps per read from '$asm.ovlStore'", undef)   if ($noSum == 0);
+    caExit("Failed to load number of overlaps per read from '$asm.ovlStore'", undef)   if ($noCnt == 0);
 
     return($rlSum, $noSum);
 }
@@ -115,37 +132,34 @@ sub readErrorDetectionConfigure ($) {
     goto allDone   if (fileExists("$path/red.sh"));    #  Script exists
     goto allDone   if (fileExists("$path/red.red"));   #  Result exists
 
-    goto allDone   if (skipStage($asm, "readErrorDetectionConfigure") == 1);
-
     goto allDone   if (fileExists("unitigging/$asm.ovlStore/evalues"));   #  Stage entrely finished
     goto allDone   if (-d "unitigging/$asm.ctgStore");                    #  Assembly finished
 
     make_path("$path")  if (! -d "$path");
 
-    my $maxID = getNumberOfReadsEarliestVersion($asm);
+    my $maxID = getNumberOfReadsInStore($asm, "all");
 
     my ($rlVec, $noVec);
     my ($rlSum, $noSum) = loadReadLengthsAndNumberOfOverlaps($asm, $maxID, \$rlVec, \$noVec);
+
+    if ($noSum == 0) {
+        print STDERR "--\n";
+        print STDERR "-- WARNING:\n";
+        print STDERR "-- WARNING: Found no overlaps.  Disabling Overlap Error Adjustment.\n";
+        print STDERR "-- WARNING:\n";
+        print STDERR "--\n";
+        setGlobal("enableOEA", 0);
+        return;
+    }
 
     #  Find the maximum size of each block of 100,000 reads.  findErrors reads up to 100,000 reads
     #  to process at one time.  It uses 1 * length + 4 * 100,000 bytes of memory for bases and ID storage,
     #  and has two buffers of this size.
 
-    my $maxBlockSize = 0;
-
-    for (my $id = 1; $id <= $maxID; $id += 100000) {
-        my $sum = 0;
-
-        for (my $ii=$id; ($ii < $id + 100000) && ($ii < $maxID); $ii++) {
-            $sum += vec($rlVec, $ii, 32);
-        }
-
-        $maxBlockSize = $sum   if ($maxBlockSize < $sum);
-    }
-
-    my $maxMem   = getGlobal("redMemory") * 1024 * 1024 * 1024;
-    my $maxReads = getGlobal("redBatchSize");
-    my $maxBases = getGlobal("redBatchLength");
+    my $maxBlockSize = 512 * 1024 * 1024;  #  This is hardcoded in findErrors.C
+    my $maxMem       = getGlobal("redMemory") * 1024 * 1024 * 1024;
+    my $maxReads     = getGlobal("redBatchSize");
+    my $maxBases     = getGlobal("redBatchLength");
 
     print STDERR "--\n";
     print STDERR "-- Configure RED for ", getGlobal("redMemory"), "gb memory.\n";
@@ -192,7 +206,7 @@ sub readErrorDetectionConfigure ($) {
         #  could be loaded (done above) and using 2x that (because there are two buffers of these
         #  reads).
         #
-        #  Throw in another 2 GB for unknown overheads (gkpStore, ovlStore) and alignment generation.
+        #  Throw in another 2 GB for unknown overheads (seqStore, ovlStore) and alignment generation.
 
         my $memory = (12 * $bases) + (33 * $reads) + (12 * $olaps) + (2 * $maxBlockSize) + 2 * 1024 * 1024 * 1024;
 
@@ -237,8 +251,8 @@ sub readErrorDetectionConfigure ($) {
     print F getBinDirectoryShellCode();
     print F "\n";
     print F setWorkDirectoryShellCode($path);
-    print F fetchStoreShellCode("unitigging/$asm.gkpStore", $path, "");
-    print F fetchStoreShellCode("unitigging/$asm.ovlStore", $path, "");
+    print F fetchSeqStoreShellCode($asm, $path, "");
+    print F fetchOvlStoreShellCode($asm, $path, "");
     print F "\n";
     print F getJobIDShellCode();
     print F "\n";
@@ -258,7 +272,7 @@ sub readErrorDetectionConfigure ($) {
     print F "fi\n";
     print F "\n";
     print F "\$bin/findErrors \\\n";
-    print F "  -G ../$asm.gkpStore \\\n";
+    print F "  -S ../../$asm.seqStore \\\n";
     print F "  -O ../$asm.ovlStore \\\n";
     print F "  -R \$minid \$maxid \\\n";
     print F "  -e " . getGlobal("utgOvlErrorRate") . " -l " . getGlobal("minOverlapLength") . " \\\n";
@@ -276,7 +290,8 @@ sub readErrorDetectionConfigure ($) {
     stashFile("$path/red.sh");
 
   finishStage:
-    emitStage($asm, "readErrorDetectionConfigure");
+    generateReport($asm);
+    resetIteration("readErrorDetectionConfigure");
 
   allDone:
 }
@@ -293,8 +308,6 @@ sub readErrorDetectionCheck ($) {
     return         if (getGlobal("enableOEA") == 0);
 
     goto allDone   if (fileExists("$path/red.red"));       #  Output exists
-
-    goto allDone   if (skipStage($asm, "readErrorDetectionCheck", $attempt) == 1);
 
     goto allDone   if (fileExists("unitigging/$asm.ovlStore/evalues"));   #  Stage entrely finished
     goto allDone   if (-d "unitigging/$asm.ctgStore");                    #  Assembly finished
@@ -346,7 +359,7 @@ sub readErrorDetectionCheck ($) {
 
         #  Otherwise, run some jobs.
 
-        emitStage($asm, "readErrorDetectionCheck", $attempt);
+        generateReport($asm);
 
         submitOrRunParallelJob($asm, "red", $path, "red", @failedJobs);
         return;
@@ -389,7 +402,8 @@ sub readErrorDetectionCheck ($) {
         unlink $f;
     }
 
-    emitStage($asm, "readErrorDetectionCheck");
+    generateReport($asm);
+    resetIteration("readErrorDetectionCheck");
 
   allDone:
 }
@@ -407,12 +421,10 @@ sub overlapErrorAdjustmentConfigure ($) {
 
     goto allDone   if (fileExists("$path/oea.sh"));   #  Script exists
 
-    goto allDone   if (skipStage($asm, "overlapErrorAdjustmentConfigure") == 1);
-
     goto allDone   if (fileExists("unitigging/$asm.ovlStore/evalues"));   #  Stage entrely finished
     goto allDone   if (-d "unitigging/$asm.ctgStore");                    #  Assembly finished
 
-    my $maxID = getNumberOfReadsEarliestVersion($asm);
+    my $maxID = getNumberOfReadsInStore($asm, "all");
 
     my ($rlVec, $noVec);
     my ($rlSum, $noSum) = loadReadLengthsAndNumberOfOverlaps($asm, $maxID, \$rlVec, \$noVec);
@@ -425,9 +437,6 @@ sub overlapErrorAdjustmentConfigure ($) {
     my @log;   undef @log;
 
     my $nj = 0;
-
-    # get earliest count of reads in store
-    my $maxID    = getNumberOfReadsEarliestVersion($asm);
 
     my $maxMem   = getGlobal("oeaMemory") * 1024 * 1024 * 1024;
     my $maxReads = getGlobal("oeaBatchSize");
@@ -543,8 +552,8 @@ sub overlapErrorAdjustmentConfigure ($) {
     print F getBinDirectoryShellCode();
     print F "\n";
     print F setWorkDirectoryShellCode($path);
-    print F fetchStoreShellCode("unitigging/$asm.gkpStore", $path, "");
-    print F fetchStoreShellCode("unitigging/$asm.ovlStore", $path, "");
+    print F fetchSeqStoreShellCode($asm, $path, "");
+    print F fetchOvlStoreShellCode($asm, $path, "");
     print F "\n";
     print F getJobIDShellCode();
     print F "\n";
@@ -566,7 +575,7 @@ sub overlapErrorAdjustmentConfigure ($) {
     print F fetchFileShellCode("unitigging/3-overlapErrorAdjustment", "red.red", "");
     print F "\n";
     print F "\$bin/correctOverlaps \\\n";
-    print F "  -G ../$asm.gkpStore \\\n";
+    print F "  -S ../../$asm.seqStore \\\n";
     print F "  -O ../$asm.ovlStore \\\n";
     print F "  -R \$minid \$maxid \\\n";
     print F "  -e " . getGlobal("utgOvlErrorRate") . " -l " . getGlobal("minOverlapLength") . " \\\n";
@@ -584,7 +593,8 @@ sub overlapErrorAdjustmentConfigure ($) {
     stashFile("$path/oea.sh");
 
   finishStage:
-    emitStage($asm, "overlapErrorAdjustmentConfigure");
+    generateReport($asm);
+    resetIteration("overlapErrorAdjustmentConfigure");
 
   allDone:
 }
@@ -601,8 +611,6 @@ sub overlapErrorAdjustmentCheck ($) {
     return         if (getGlobal("enableOEA") == 0);
 
     goto allDone   if (fileExists("$path/oea.files"));   #  Output exists
-
-    goto allDone   if (skipStage($asm, "overlapErrorAdjustmentCheck", $attempt) == 1);
 
     goto allDone   if (fileExists("unitigging/$asm.ovlStore/evalues"));   #  Stage entrely finished
     goto allDone   if (-d "unitigging/$asm.ctgStore");                    #  Assembly finished
@@ -659,7 +667,7 @@ sub overlapErrorAdjustmentCheck ($) {
 
         #  Otherwise, run some jobs.
 
-        emitStage($asm, "overlapErrorAdjustmentCheck", $attempt);
+        generateReport($asm);
 
         submitOrRunParallelJob($asm, "oea", $path, "oea", @failedJobs);
         return;
@@ -676,7 +684,8 @@ sub overlapErrorAdjustmentCheck ($) {
 
     stashFile("$path/oea.files");
 
-    emitStage($asm, "overlapErrorAdjustmentCheck");
+    generateReport($asm);
+    resetIteration("overlapErrorAdjustmentCheck");
 
   allDone:
 }
@@ -692,8 +701,6 @@ sub updateOverlapStore ($) {
 
     return         if (getGlobal("enableOEA") == 0);
 
-    goto allDone   if (skipStage($asm, "updateOverlapStore") == 1);
-
     goto allDone   if (fileExists("unitigging/$asm.ovlStore/evalues"));   #  Stage entrely finished
     goto allDone   if (-d "unitigging/$asm.ctgStore");                    #  Assembly finished
 
@@ -708,12 +715,11 @@ sub updateOverlapStore ($) {
     }
     close(F);
 
-    fetchStore("unitigging/$asm.ovlStore");
+    fetchOvlStore($asm, "unitigging");
 
-    $cmd  = "$bin/ovStoreBuild \\\n";
-    $cmd .= "  -G ../$asm.gkpStore \\\n";
+    $cmd  = "$bin/loadErates \\\n";
+    $cmd .= "  -S ../../$asm.seqStore \\\n";
     $cmd .= "  -O ../$asm.ovlStore \\\n";
-    $cmd .= "  -evalues \\\n";
     $cmd .= "  -L ./oea.files \\\n";
     $cmd .= "> ./oea.apply.err 2>&1";
 
@@ -734,7 +740,8 @@ sub updateOverlapStore ($) {
     addToReport("adjustments", $report);
 
   finishStage:
-    emitStage($asm, "updateOverlapStore");
+    generateReport($asm);
+    resetIteration("updateOverlapStore");
 
   allDone:
 }

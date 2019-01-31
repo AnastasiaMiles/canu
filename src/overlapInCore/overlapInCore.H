@@ -62,7 +62,7 @@
 
 #include "AS_global.H"
 
-#include "gkStore.H"
+#include "sqStore.H"
 #include "ovStore.H"
 
 #include "prefixEditDistance.H"
@@ -153,13 +153,6 @@
 //  just shifts from periodic regions) between 2 fragments
 //  in a given orientation.  For fragments of approximately
 //  same size, should never be more than 2.
-
-#define  EXPECTED_STRING_LEN     (AS_MAX_READLEN / 2)
-#define  INITIAL_DATA_LEN        (EXPECTED_STRING_LEN * Max_Hash_Strings)
-//  The number of bytes to allocate initially for hash-table sequence
-
-#define  MAX_LINE_LEN            1000
-//  Maximum input line when reading FASTA file
 
 #define  MAX_NAME_LEN            500
 //  Longest file name allowed
@@ -287,7 +280,7 @@ typedef  struct Work_Area {
   int32  A_Olaps_For_Frag;
   int32  B_Olaps_For_Frag;
 
-  gkStore  *gkpStore;
+  sqStore  *seqStore;
 
   int    left_end_screened;
   int    right_end_screened;
@@ -436,7 +429,7 @@ public:
     maxLibToRef  = UINT32_MAX;
 
     Kmer_Len = 0;
-    Kmer_Skip_File = NULL;
+    kmerSkipFileName = NULL;
     Filter_By_Kmer_Count = 0;
 
     Frag_Olap_Limit = UINT64_MAX;
@@ -445,7 +438,6 @@ public:
 
     Hash_Mask_Bits       = 22;
     Max_Hash_Load        = 0.6;
-    Max_Hash_Strings     = 10000;
     Max_Hash_Data_Len    = 100000000;
 
     Outfile_Name = NULL;
@@ -488,7 +480,7 @@ public:
 
   uint64  Kmer_Len;         //  -k
   uint64  Filter_By_Kmer_Count;
-  FILE   *Kmer_Skip_File;   //  -k
+  char   *kmerSkipFileName; //  -k
 
   //  Maximum number of overlaps for end of an old fragment against
   //  a single hash table of frags, in each orientation
@@ -501,7 +493,6 @@ public:
 
   uint32  Hash_Mask_Bits;  //  --hashbits
 
-  uint32  Max_Hash_Strings;  //  --hashstrings
   uint64  Max_Hash_Data_Len;  //  --hashdatalen
   double  Max_Hash_Load;  //  --hashload
 
@@ -561,6 +552,6 @@ void *
 Process_Overlaps (void *);
 
 int
-Build_Hash_Index(gkStore *store, uint32 bgnID, uint32 endID);
+Build_Hash_Index(sqStore *store, uint32 bgnID, uint32 endID);
 
 #endif  //  OVERLAPINCORE_H

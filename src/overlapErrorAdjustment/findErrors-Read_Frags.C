@@ -32,14 +32,14 @@
 
 
 //  Open and read fragments with IIDs from  Lo_Frag_IID  to
-//  Hi_Frag_IID (INCLUSIVE) from  gkpStore_Path  and store them in
+//  Hi_Frag_IID (INCLUSIVE) from  seqStore_Path  and store them in
 //  global  Frag .
 
 //  This shares lots of code with Extract_Needed_Frags.
 
 void
 Read_Frags(feParameters   *G,
-           gkStore        *gkpStore) {
+           sqStore        *seqStore) {
 
   //  The original converted to lowercase, and made non-acgt be 'a'.
 
@@ -60,25 +60,19 @@ Read_Frags(feParameters   *G,
   uint64  votesLength = 0;
   uint64  readsLoaded = 0;
 
-  fprintf(stderr, "Read_Frags()-- from " F_U32 " through " F_U32 "\n",
-          G->bgnID, G->endID);
 
   for (uint32 curID=G->bgnID; curID<=G->endID; curID++) {
-    gkRead *read = gkpStore->gkStore_getRead(curID);
+    sqRead *read = seqStore->sqStore_getRead(curID);
 
-    basesLength += read->gkRead_sequenceLength() + 1;
-    votesLength += read->gkRead_sequenceLength();
+    basesLength += read->sqRead_sequenceLength() + 1;
+    votesLength += read->sqRead_sequenceLength();
   }
 
   uint64  totAlloc = (sizeof(char)         * basesLength +
                       sizeof(Vote_Tally_t) * votesLength +
                       sizeof(Frag_Info_t)  * G->readsLen);
 
-  fprintf(stderr, "Read_Frags()-- allocate " F_U64 " MB for bases, votes and info, for %u reads of total length " F_U64 " (%.2f MB)\n",
-          totAlloc >> 20,
-          G->endID - G->bgnID + 1,
-          basesLength,
-          totAlloc / 1024.0 / 1024.0);
+  fprintf(stderr, "Read_Frags()-- Loading target reads " F_U32 " through " F_U32 " with " F_U64 " bases.\n", G->bgnID, G->endID, basesLength);
 
   G->readBases = new char          [basesLength];
   G->readVotes = new Vote_Tally_t  [votesLength];             //  NO constructor, MUST INIT
@@ -91,15 +85,15 @@ Read_Frags(feParameters   *G,
   basesLength = 0;
   votesLength = 0;
 
-  gkReadData  *readData = new gkReadData;
+  sqReadData  *readData = new sqReadData;
 
   for (uint32 curID=G->bgnID; curID<=G->endID; curID++) {
-    gkRead *read       = gkpStore->gkStore_getRead(curID);
+    sqRead *read       = seqStore->sqStore_getRead(curID);
 
-    gkpStore->gkStore_loadReadData(read, readData);
+    seqStore->sqStore_loadReadData(read, readData);
 
-    uint32  readLength = read->gkRead_sequenceLength();
-    char   *readBases  = readData->gkReadData_getSequence();
+    uint32  readLength = read->sqRead_sequenceLength();
+    char   *readBases  = readData->sqReadData_getSequence();
 
     G->reads[curID - G->bgnID].sequence = G->readBases + basesLength;
     G->reads[curID - G->bgnID].vote     = G->readVotes + votesLength;
@@ -122,6 +116,6 @@ Read_Frags(feParameters   *G,
 
   delete readData;
 
-  fprintf(stderr, "Read_Frags()-- from " F_U32 " through " F_U32 " -- loaded " F_U64 " bases in " F_U64 " reads.\n",
-          G->bgnID, G->endID-1, basesLength, readsLoaded);
+  fprintf(stderr, "Read_Frags()-- %.3f GB for bases, votes and info.\n", totAlloc / 1024.0 / 1024.0 / 1024.0);
+  fprintf(stderr, "\n");
 }

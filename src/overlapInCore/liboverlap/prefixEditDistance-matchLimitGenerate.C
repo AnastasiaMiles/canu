@@ -32,7 +32,7 @@
  */
 
 #include "AS_global.H"
-#include "gkStore.H"
+#include "sqStore.H"
 
 #include "Binomial_Bound.H"
 
@@ -42,7 +42,7 @@
 
 //  To use:
 //
-//  Set read length in gkStore.H.  Run this "50 5000 50" to compute data from 0.50% to 50.00%
+//  Set read length in sqStore.H.  Run this "50 5000 50" to compute data from 0.50% to 50.00%
 //  in steps of 0.50%.  It will write three output files with the data:
 //    *.C    - for inclusion in programs
 //    *.bin  - binary dump of the array
@@ -116,7 +116,7 @@ main(int argc, char **argv) {
 
     sprintf(N, "%s/prefixEditDistance-matchLimit-%04d.bin", D, evalue);
 
-    if (AS_UTL_fileExists(N)) {
+    if (fileExists(N)) {
       fprintf(stderr, "eValue %04d -- eRate %6.4f -- %7.4f%% error -- %8d values -- thread %2d - LOAD\n",
               evalue, erate, erate * 100.0, MAX_ERRORS, omp_get_thread_num());
 
@@ -200,7 +200,7 @@ main(int argc, char **argv) {
       fprintf(F, "//  Automagically generated.  Do not edit.\n");
       fprintf(F, "//\n");
       fprintf(F, "\n");
-      fprintf(F, "#include \"gkStore.H\"\n");
+      fprintf(F, "#include \"sqStore.H\"\n");
       fprintf(F, "\n");
       fprintf(F, "#if (AS_MAX_READLEN_BITS == %d)\n", AS_MAX_READLEN_BITS);
       fprintf(F, "\n");

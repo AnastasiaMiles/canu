@@ -43,649 +43,796 @@
  *  full conditions and disclaimers for each license.
  */
 
-#undef  NEW_MERYL   //  Loses last mer sometimes
-
-
-#ifndef NEW_MERYL
-
-#include <stdio.h>
-#include <stdlib.h>
-#include <errno.h>
-#include <string.h>
-
 #include "meryl.H"
+#include "strings.H"
+#include "system.H"
 
-int
-main(int argc, char **argv) {
-  merylArgs   *args = new merylArgs(argc, argv);
 
-  switch (args->personality) {
-    case 'P':
-      estimate(args);
-      break;
-
-    case 'B':
-      build(args);
-      break;
-
-    case 'd':
-      dumpDistanceBetweenMers(args);
-      break;
-    case 't':
-      dumpThreshold(args);
-      break;
-    case 'p':
-      dumpPositions(args);
-      break;
-    case 'c':
-      countUnique(args);
-      break;
-    case 'h':
-      plotHistogram(args);
-      break;
-
-    case PERSONALITY_MIN:
-    case PERSONALITY_MINEXIST:
-    case PERSONALITY_MAX:
-    case PERSONALITY_MAXEXIST:
-    case PERSONALITY_ADD:
-      //case PERSONALITY_AND:
-    case PERSONALITY_NAND:
-    case PERSONALITY_OR:
-    case PERSONALITY_XOR:
-      multipleOperations(args);
-      break;
-
-    case PERSONALITY_SUB:
-    case PERSONALITY_DIFFERENCE:
-    case PERSONALITY_ABS:
-    case PERSONALITY_DIVIDE:
-    case PERSONALITY_AND:
-      binaryOperations(args);
-      break;
-
-    case PERSONALITY_LEQ:
-    case PERSONALITY_GEQ:
-    case PERSONALITY_EQ:
-      unaryOperations(args);
-      break;
-
-    default:
-      args->usage();
-      fprintf(stderr, "%s: unknown personality.  Specify -P, -B, -S or -M!\n", args->execName);
-      exit(1);
-      break;
-  }
-
-  delete args;
-
-  return(0);
-}
-
-#else
-
-#include "AS_global.H"
-#include "AS_UTL_fileIO.H"
-
-#include "libmeryl.H"
-#include "kMer.H"
-
-#include <vector>
-#include <stack>
-using namespace std;
-
-
-enum merylOp {
-  opUnion,
-  opUnionMin,
-  opUnionMax,
-  opUnionSum,
-  opIntersect,
-  opIntersectMin,
-  opIntersectMax,
-  opIntersectSum,
-  opDifference,
-  opSymmetricDifference,
-  opComplement,
-  opNothing
-};
-
-
-char const *
-toString(merylOp op) {
-  switch (op) {
-    case opUnion:                return("opUnion");                break;
-    case opUnionMin:             return("opUnionMin");             break;
-    case opUnionMax:             return("opUnionMax");             break;
-    case opUnionSum:             return("opUnionSum");             break;
-    case opIntersect:            return("opIntersect");            break;
-    case opIntersectMin:         return("opIntersectMin");         break;
-    case opIntersectMax:         return("opIntersectMax");         break;
-    case opIntersectSum:         return("opIntersectSum");         break;
-    case opDifference:           return("opDifference");           break;
-    case opSymmetricDifference:  return("opSymmetricDifference");  break;
-    case opComplement:           return("opComplement");           break;
-    case opNothing:              return("opNothing");              break;
-  }
-
-  assert(0);
-  return(NULL);
-}
-
-
-
-
-class merylOperation;
-
-
-class merylInput {
-public:
-  merylInput(char *n, merylStreamReader *s);
-  merylInput(merylOperation *o);
-  ~merylInput();
-
-  void   nextMer(void);
-
-  merylStreamReader  *_stream;
-  merylOperation     *_operation;
-
-  char                _name[FILENAME_MAX];
-
-  kMer                _kmer;
-  uint64              _count;
-  bool                _valid;
-};
-
-
-
-
-class merylOperation {
-public:
-  merylOperation(merylOp op=opNothing);
-  ~merylOperation();
-
-  void    addInput(char *name, merylStreamReader *reader);
-  void    addInput(merylOperation *operation);
-
-  void    addOutput(char *name, merylStreamWriter *writer);
-
-  void    setOperation(merylOp op) { _operation = op;    };
-  merylOp getOperation(void)       { return(_operation); };
-
-  kMer   &theFMer(void)            { return(_kmer);   };
-  uint64  theCount(void)           { return(_count);  };
-
-  bool    nextMer(void);
-  bool    validMer(void)           { return(_valid);  };
-
-private:
-  void    findMinCount(void);
-  void    findMaxCount(void);
-  void    findSumCount(void);
-
-  vector<merylInput *>           _inputs;
-
-  merylOp                        _operation;
-
-  char                           _outputName[FILENAME_MAX];
-  merylStreamWriter             *_output;
-
-  kMer                           _smallest;
-
-  uint32                         _actLen;
-  uint64                        *_actCount;
-  uint32                        *_actIndex;
-
-  kMer                           _kmer;
-  uint64                         _count;
-  bool                           _valid;
-};
-
-
-
-
-
-
-
-merylInput::merylInput(char *n, merylStreamReader *s) {
-  _stream      = s;
-  _operation   = NULL;
-  _count       = 0;
-  _valid       = false;
-
-  strncpy(_name, n, FILENAME_MAX);
-}
-
-
-merylInput::merylInput(merylOperation *o) {
-  _stream      = NULL;
-  _operation   = o;
-  _count       = 0;
-  _valid       = false;
-
-  strncpy(_name, toString(_operation->getOperation()), FILENAME_MAX);
-}
-
-
-merylInput::~merylInput() {
-  fprintf(stderr, "Destroy input %s\n", _name);
-  delete _stream;
-  delete _operation;
-}
-
-
-void
-merylInput::nextMer(void) {
-  char kmerString[256];
-
-  if (_stream) {
-    _valid = _stream->nextMer();
-    _kmer  = _stream->theFMer();
-    _count = _stream->theCount();
-  }
-
-  if (_operation) {
-    _valid = _operation->nextMer();
-    _kmer  = _operation->theFMer();
-    _count = _operation->theCount();
-  }
-}
-
-
-
-
-
-
-
-
-merylOperation::merylOperation(merylOp op) {
-  fprintf(stderr, "Create operation '%s'\n", toString(op));
-
-  _operation     = op;
-
-  _outputName[0] = 0;
-  _output        = NULL;
-
-  _actLen        = 0;
-  _actCount      = new uint64 [1024];
-  _actIndex      = new uint32 [1024];
-
-  _count         = 0;
-  _valid         = true;
-}
-
-
-merylOperation::~merylOperation() {
-  fprintf(stderr, "Destroy op %s\n", toString(_operation));
-
-  for (uint32 ii=0; ii<_inputs.size(); ii++)
-    delete _inputs[ii];
-
-  delete    _output;
-  delete [] _actCount;
-  delete [] _actIndex;
-}
-
-
-
-
-void
-merylOperation::addInput(char *name, merylStreamReader *reader) {
-  fprintf(stderr, "Adding input file '%s' to operation '%s'\n",
-          name, toString(_operation));
-
-  _inputs.push_back(new merylInput(name, reader));
-
-  _actIndex[_actLen++] = _inputs.size() - 1;
-}
-
-
-void
-merylOperation::addInput(merylOperation *operation) {
-  fprintf(stderr, "Adding input from operation '%s' to operation '%s'\n",
-          toString(operation->_operation), toString(_operation));
-
-  _inputs.push_back(new merylInput(operation));
-
-  _actIndex[_actLen++] = _inputs.size() - 1;
-}
-
-
-void
-merylOperation::addOutput(char *name, merylStreamWriter *writer) {
-  fprintf(stderr, "Adding output to file '%s' from operation '%s'\n",
-          name, toString(_operation));
-
-  strncpy(_outputName, name, FILENAME_MAX);
-  _output = writer;
-}
-
-
-
-
-void
-merylOperation::findMinCount(void) {
-  _count = _actCount[0];
-  for (uint32 ii=1; ii<_actLen; ii++)
-    if (_actCount[ii] < _count)
-      _count = _actCount[ii];
-}
-
-
-void
-merylOperation::findMaxCount(void) {
-  _count = _actCount[0];
-  for (uint32 ii=1; ii<_actLen; ii++)
-    if (_count < _actCount[ii])
-      _count = _actCount[ii];
-}
-
-
-void
-merylOperation::findSumCount(void) {
-  for (uint32 ii=0; ii<_actLen; ii++)
-    _count += _actCount[ii];
-}
+//  In meryOp-count.C
+uint64
+findMaxInputSizeForMemorySize(uint32 kMerSize, uint64 memorySize);
 
 
 bool
-merylOperation::nextMer(void) {
+isDigit(char c) {
+  return(('0' <= c) && (c <= '9'));
+}
 
-  char  kmerString[256];
+bool
+isNumber(char *s, char dot='.') {
 
-  //  Find the smallest kmer in the _inputs, and save their counts in _actCount.
-  //  Mark which input was used in _actIndex.
-
-  fprintf(stderr, "\n");
-
-  //  Grab the next mer for every input that was active in the last iteration.
-  //  (on the first call, all inputs were 'active' last time)
-  //
-  for (uint32 ii=0; ii<_actLen; ii++)
-    _inputs[_actIndex[ii]]->nextMer();
-
-  _actLen = 0;
-
-  //  Log.
-
-  for (uint32 ii=0; ii<_inputs.size(); ii++) {
-    fprintf(stderr, "input %s kmer %s count %lu%s\n",
-            _inputs[ii]->_name,
-            _inputs[ii]->_kmer.merToString(kmerString),
-            _inputs[ii]->_count,
-            _inputs[ii]->_valid ? " valid" : "");
-  }
-
-  for (uint32 ii=0; ii<_inputs.size(); ii++) {
-    if (_inputs[ii]->_valid == false)
-      continue;
-
-    //  Of we have no active kmer, or the input kmer is smaller than the one we
-    //  have, reset the list.
-
-    if ((_actLen == 0) ||
-        (_inputs[ii]->_kmer < _kmer)) {
-      _actLen = 0;
-      _kmer              = _inputs[ii]->_kmer;
-      _actCount[_actLen] = _inputs[ii]->_count;
-      _actIndex[_actLen] = ii;
-      _actLen++;
-
-      fprintf(stderr, "Active kmer %s from input %s. reset\n", _kmer.merToString(kmerString), _inputs[ii]->_name);
-    }
-
-    //  Otherwise, if the input kmer is the one we have, save the count to the list.
-
-    else if (_inputs[ii]->_kmer == _kmer) {
-      //_kmer             = _inputs[ii]->_kmer;
-      _actCount[_actLen] = _inputs[ii]->_count;
-      _actIndex[_actLen] = ii;
-      _actLen++;
-
-      fprintf(stderr, "Active kmer %s from input %s\n", _kmer.merToString(kmerString), _inputs[ii]->_name);
-    }
-
-    //  Otherwise, the input kmer comes after the one we're examining, ignore it.
-
-    else {
-    }
-  }
-
-  //  If no active kmers, we're done.
-
-  fprintf(stderr, "op %s activeLen %u kmer %s\n", toString(_operation), _actLen, _kmer.merToString(kmerString));
-
-  if (_actLen == 0) {
-    _valid = false;
+  if (s == NULL)
     return(false);
-  }
 
-  //  Otherwise, active kmers!  Figure out what the count should be.
-
-  //  If math-subtract gets implemented, use negative-zero to mean "don't output" and positive-zero
-  //  to mean zero.  For now, count=0 means don't output.
-
-  //  Set the count to zero, meaning "don't output the kmer".  Intersect depends on this,
-  //  skipping most of it's work if all files don't have the kmer.
-  _count = 0;
-
-  switch (_operation) {
-    case opUnion:
-      _count = 1;
-      break;
-
-    case opUnionMin:
-      findMinCount();
-      break;
-
-    case opUnionMax:
-      findMaxCount();
-      break;
-
-    case opUnionSum:
-      findSumCount();
-      break;
-
-    case opIntersect:                       //  Intersect, retain count of first file
-      if (_actLen == _inputs.size())
-        _count = _actCount[0];
-      break;
-
-    case opIntersectMin:                    //  Intersect, retain smallest count
-      if (_actLen == _inputs.size())
-        findMinCount();
-      break;
-
-    case opIntersectMax:                    //  Intersect, retain largest count
-      if (_actLen == _inputs.size())
-        findMaxCount();
-      break;
-
-    case opIntersectSum:                    //  Intersect, sum all counts
-      if (_actLen == _inputs.size())
-        findSumCount();
-      break;
-
-    case opDifference:
-      if ((_actLen == 1) &&                 //  If only found in one set, and that
-          (_actIndex[0] == 0))              //  set is the first one, save it.
-        _count = _actCount[0];
-      break;
-
-    case opSymmetricDifference:
-      break;
-
-    case opComplement:
-      break;
-
-    case opNothing:
-      break;
-  }
-
-  //  If flagged for output, output!
-
-  if ((_output != NULL) &&
-      (_count  != 0)) {
-    fprintf(stderr, "OUTPUT %s count %lu\n", _kmer.merToString(kmerString), _count);
-    _output->addMer(_kmer, _count);
-  }
+  for (uint32 ii=0; s[ii] != 0; ii++)
+    if ((isDigit(s[ii]) == false) &&
+        (s[ii] != dot))
+      return(false);
 
   return(true);
 }
 
 
 
+class merylOpStack {
+public:
+  merylOpStack(uint32 nFiles) {
+    _nFiles     = nFiles;
+    _stacks     = new stack <merylOperation *> [nFiles];
+    _operations = new vector<merylOperation *> [nFiles];
+  };
+
+  ~merylOpStack() {
+    delete [] _stacks;
+    delete [] _operations;
+  };
+
+  uint32    numberOfOperations(void) {
+    return(_operations[0].size());
+  };
+
+  uint32    numberOfFiles(void) {
+    return(_nFiles);
+  };
+
+  merylOperation *getOp(uint32 file) {
+    return(_stacks[file].top());
+  };
+
+  merylOperation *getOp(uint32 opNum, uint32 fileNum) {
+    assert(fileNum < _nFiles);
+    assert(opNum   < _operations[fileNum].size());
+    return(_operations[fileNum][opNum]);
+  };
+
+  void            pushOp(merylOp opName, uint32 allowedThreads, uint64 allowedMemory) {
+    for (uint32 ff=0; ff<_nFiles; ff++) {
+      merylOperation *newOp = new merylOperation(opName, ff, allowedThreads, allowedMemory);
+
+      if (_stacks[ff].empty() == false)        //  If a command exists, the new command
+        _stacks[ff].top()->addInput(newOp);    //  supplies input to the existing command.
+
+      _stacks[ff].push(newOp);                 //  Make the new command the current command.
+      _operations[ff].push_back(newOp);
+    }
+  };
+
+  void            popOp(void) {
+    for (uint32 ff=0; ff<_nFiles; ff++)
+      _stacks[ff].pop();
+  };
+
+  //  For input from a database, we need to create new reader objects for
+  //  each thread - for simplicity, we just make a new object for each input
+  //  file.
+  //
+  void    addInput(kmerCountFileReader *reader) {
+
+    //#pragma omp parallel for schedule(dynamic, 1)
+    for (uint32 ff=0; ff<_nFiles; ff++)
+      _stacks[ff].top()->addInput(new kmerCountFileReader(reader->filename(), ff));
+
+    delete reader;
+  };
+
+  //  dnaSeqFile and sqStore inputs are only used by counting, and that
+  //  doesn't use the threaded merylOperation scheme here.
+  //
+  void    addInput(dnaSeqFile *sequence) {
+    _stacks[0].top()->addInput(sequence);
+  };
+
+#ifdef CANU
+  void    addInput(sqStore *store, uint32 segment, uint32 segmentMax) {
+    _stacks[0].top()->addInput(store, segment, segmentMax);
+  };
+#endif
+
+  //  Counting operations only need the output associated with the first
+  //  file, and associating with other files just makes life difficult and/or
+  //  dangerous, so don't.
+  //
+  void    addOutput(char *writerName) {
+    kmerCountFileWriter   *writer = new kmerCountFileWriter(writerName);
+
+    if (isCounting())
+      _stacks[0].top()->addOutput(writer);
+    else
+      for (uint32 ff=0; ff<_nFiles; ff++)
+        _stacks[ff].top()->addOutput(writer);
+  };
+
+  void    addPrinter(char *printerName) {
+    char  T[FILENAME_MAX+1] = { 0 };
+    char  N[FILENAME_MAX+1] = { 0 };
+
+    if ((printerName == NULL) ||
+        (strcmp(printerName, "-") == 0)) {
+      for (uint32 ff=0; ff<_nFiles; ff++)
+        _stacks[ff].top()->addPrinter(stdout);
+      return;
+    }
+
+    strncpy(T, printerName, FILENAME_MAX);
+
+    char   *pre = T;
+    char   *suf = strchr(T, '#');
+    uint32  len = 0;
+
+    while ((suf) && (*suf == '#')) {
+      *suf = 0;
+      len++;
+      suf++;
+    }
+
+    for (uint32 ff=0; ff<_nFiles; ff++) {
+      if (len == 0)
+        snprintf(N, FILENAME_MAX, "%s.%d", printerName, ff);
+      else
+        snprintf(N, FILENAME_MAX, "%s%0*d%s", pre, len, ff, suf);
+
+      _stacks[ff].top()->addPrinter(AS_UTL_openOutputFile(N));
+   }
+  };
+
+
+
+  void       setThreshold(uint64 p) {
+    for (uint32 ff=0; ff<_nFiles; ff++) {
+      _stacks[ff].top()->setThreshold(p);
+      _stacks[ff].top()->setConstant(p);
+    }
+  };
+
+  void       setFractionDistinct(double p) {
+    for (uint32 ff=0; ff<_nFiles; ff++)
+      _stacks[ff].top()->setFractionDistinct(p);
+  };
+
+  void       setWordFrequency(double p) {
+    for (uint32 ff=0; ff<_nFiles; ff++)
+      _stacks[ff].top()->setWordFrequency(p);
+  };
+
+  void       setExpectedNumberOfKmers(uint64 n) {
+    for (uint32 ff=0; ff<_nFiles; ff++)
+      _stacks[ff].top()->setExpectedNumberOfKmers(n);
+  };
+
+
+
+
+  void       setMemoryLimit(uint64 m) {
+    for (uint32 ff=0; ff<_nFiles; ff++)
+      _stacks[ff].top()->setMemoryLimit(m);
+  };
+
+  void       setThreadLimit(uint32 t) {
+    for (uint32 ff=0; ff<_nFiles; ff++)
+      _stacks[ff].top()->setThreadLimit(t);
+  };
+
+  uint64     size(void)                    { return(_stacks[0].size());                  };
+  bool       empty(void)                   { return(_stacks[0].size() == 0);             };
+
+  bool       isCounting(void)              { return(_stacks[0].top()->isCounting());     };
+  bool       isNormal(void)                { return(_stacks[0].top()->isNormal());       };
+  bool       needsParameter(void)          { return(_stacks[0].top()->needsParameter()); };
+
+private:
+  uint32                     _nFiles;
+  stack<merylOperation *>   *_stacks;
+  vector<merylOperation *>  *_operations;
+};
+
+
+
 
 int
 main(int argc, char **argv) {
-  stack<merylOperation *>   opStack;
+  uint32                    optStringLen = 0;
+  char                      optString[FILENAME_MAX+1];
+  char                      inoutName[FILENAME_MAX+1];
+  char                      indexName[FILENAME_MAX+1];
+  char                      sqInfName[FILENAME_MAX+1];
+  char                      sqRdsName[FILENAME_MAX+1];
 
-#warning "need to scan the input files to make sure they're all the same mersize"
-  uint32                    merSize = 22;
+#warning HARD CODED NUMBER OF FILES!
+  merylOpStack              opStack(64);
 
-  uint32                    outputArg = UINT32_MAX;
+  merylOp                   opName         = opNothing;
+
+  uint32                    outputArg      = UINT32_MAX;
+  uint32                    printerArg     = UINT32_MAX;
+
+  char                     *writerName     = NULL;
+  char                     *printerName    = NULL;
+
+  kmerCountFileReader      *reader         = NULL;
+  dnaSeqFile               *sequence       = NULL;
+#ifdef CANU
+  sqStore                  *store          = NULL;
+#endif
+
+  uint32                    terminating    = 0;
+
+  uint32                    physThreads    = omp_get_max_threads();     //  Absolute maximum limits on
+  uint64                    physMemory     = getPhysicalMemorySize();   //  memory= and threads= values.
+
+  uint32                    allowedThreads = physThreads;               //  Global limits, if memory= or
+  uint64                    allowedMemory  = physMemory;                //  threads= is set before any operation.
+
+  uint32                    segment        = 1;
+  uint32                    segmentMax     = 1;
+
+  argc = AS_configure(argc, argv);
 
   vector<char *>  err;
-  int             arg = 1;
-  while (arg < argc) {
-    char    mcidx[FILENAME_MAX];
-    char    mcdat[FILENAME_MAX];
-    char    opt[FILENAME_MAX];
-    uint32  optLen = strlen(argv[arg]);
+  for (int32 arg=1; arg < argc; arg++) {
 
-    uint32   creating    = 0;
-    uint32   terminating = 0;
+    //  Save a copy of the string.  Ugly code here, but simplifies handling
+    //  of the brackets later (and argv might be read-only).
 
-    strncpy(opt, argv[arg], FILENAME_MAX);
+    optStringLen = strlen(argv[arg]);
 
-    //  If we have [ as the first character, make a new operation (with no
-    //  operation set yet) and add it to the inputs, then push on the stack.
+    strncpy(optString, argv[arg], FILENAME_MAX);
+
+    //  Ignore '[' at the start of the string.  Their purpose is in the matching ']' which
+    //  tells us to stop adding inputs to the current command.
     //
-    //  We can get 0 or 1 open bracket at a time.  Seeing two in a row is an error,
-    //  but it isn't caught.
+    //  There should only be one opening bracket.
 
-    if (opStack.empty() == true) {
-      creating = true;
+    if (optString[0] == '[') {
+      for (uint32 ii=0; ii<optStringLen; ii++)
+        optString[ii] = optString[ii+1];
+
+      optStringLen--;
     }
 
-    if (opt[0] == '[') {
-      strncpy(opt, argv[arg]+1, FILENAME_MAX);
-      optLen--;
-
-      creating = true;
-    }
-
-    //  If we have a ] as the last character, strip it off and remember.
+    //  If we have a ] as the last character, strip it off and remember that we need to
+    //  close the command on the stack after we process this arg.
     //
     //  We can get any number of closing brackets.
 
-    while (opt[optLen-1] == ']') {
-      opt[optLen-1] = 0;
-      optLen--;
+    while ((optStringLen > 0) &&
+           (optString[optStringLen-1] == ']')) {
+      optString[optStringLen-1] = 0;
+      optStringLen--;
 
       terminating++;
     }
 
-    //  Now that brackets are stripped, make meryl database names for the arg.
+    //  Save a few copies of the command line word.
 
-    snprintf(mcidx, FILENAME_MAX, "%s.mcidx", opt);
-    snprintf(mcdat, FILENAME_MAX, "%s.mcdat", opt);
+    strncpy(inoutName, optString, FILENAME_MAX);
+    snprintf(indexName, FILENAME_MAX, "%s/merylIndex", optString);
+    snprintf(sqInfName, FILENAME_MAX, "%s/info",       optString);
+    snprintf(sqRdsName, FILENAME_MAX, "%s/reads",      optString);
 
-    merylOp             op     = opNothing;
-    merylStreamWriter  *writer = NULL;
-    merylStreamReader  *reader = NULL;
+    //  Scan for debug options.
 
-    if      (opt[0] == 0)
+    if (strcmp(optString, "dumpIndex") == 0) {               //  Report the index for the dataset.
+      arg++;                                                 //  It's just the parameters used for encoding.
+      delete new kmerCountFileReader(argv[arg++], true);
+      continue;
+    }
+
+    if (strcmp(optString, "dumpFile") == 0) {                //  Dump the index for a single data file.
+      arg++;
+      dumpMerylDataFile(argv[arg++]);
+      continue;
+    }
+
+    //  Scan for options.  If any trigger, set the option and move on to the next word on the command line.
+
+    if     ((strcmp(optString, "-h")   == 0) ||
+            (strcmp(optString, "help") == 0)) {
+      err.push_back(NULL);
+      continue;
+    }
+
+    //  Kmer size.
+    else if ((optStringLen > 2) &&
+             (strncmp(optString, "k=", 2) == 0) &&
+             (isNumber(optString + 2) == true)) {
+      kmerTiny::setSize(strtouint32(optString + 2));
+      continue;
+    }
+
+    //  Number of kmers expected for counting.
+    else if ((opStack.size() > 0) &&
+             (optStringLen > 2) &&
+             (strncmp(optString, "n=", 2) == 0) &&
+             (isNumber(optString + 2) == true)) {
+      opStack.setExpectedNumberOfKmers(strtouint64(optString + 2));
+      continue;
+    }
+
+
+
+    //  Threshold values for less-than, etc, specifed as a fraction
+    //  of the total distinct kmers, or as a word-frequency, or as
+    //  an absolute count.
+
+    else if ((opStack.size() > 0) &&
+             (opStack.needsParameter() == true) &&
+             (strncmp(optString, "d=", 2) == 0) &&
+             (isNumber(optString + 2))) {
+      opStack.setFractionDistinct(strtodouble(optString + 2));
+      continue;
+    }
+    else if ((opStack.size() > 0) &&
+             (opStack.needsParameter() == true) &&
+             (strncmp(optString, "distinct=", 9) == 0) &&
+             (isNumber(optString + 9))) {
+      opStack.setFractionDistinct(strtodouble(optString + 9));
+      continue;
+    }
+
+    else if ((opStack.size() > 0) &&
+             (opStack.needsParameter() == true) &&
+             (strncmp(optString, "f=", 2) == 0) &&
+             (isNumber(optString + 2))) {
+      opStack.setWordFrequency(strtodouble(optString + 2));
+      continue;
+    }
+    else if ((opStack.size() > 0) &&
+             (opStack.needsParameter() == true) &&
+             (strncmp(optString, "word-frequency=", 15) == 0) &&
+             (isNumber(optString + 15))) {
+      opStack.setWordFrequency(strtodouble(optString + 15));
+      continue;
+    }
+
+    else if ((opStack.size() > 0) &&
+             (opStack.needsParameter() == true) &&
+             (strncmp(optString, "t=", 15) == 0) &&
+             (isNumber(optString + 2))) {
+      opStack.setThreshold(strtouint64(optString + 2));
+      continue;
+    }
+    else if ((opStack.size() > 0) &&
+             (opStack.needsParameter() == true) &&
+             (strncmp(optString, "threshold=", 10) == 0) &&
+             (isNumber(optString + 10))) {
+      opStack.setThreshold(strtouint64(optString + 10));
+      continue;
+    }
+    else if ((opStack.size() > 0) &&
+             (opStack.needsParameter() == true) &&
+             (isNumber(optString))) {
+      opStack.setThreshold(strtouint64(optString));
+      continue;
+    }
+
+
+
+
+    //  Memory limit, either global or per-task.
+    else if ((optStringLen > 7) &&
+             (strncmp(optString, "memory=", 7) == 0) &&
+             (isNumber(optString + 7) == true)) {
+      uint64 memory = (uint64)(strtodouble(optString + 7) * 1024 * 1024 * 1024);
+
+      if (memory > physMemory) {
+        char *s = new char [1024];
+        snprintf(s, 1024, "Requested memory '%s' (GB) is more than physical memory %.2f GB.",
+                 optString, physMemory / 1024.0 / 1024.0 / 1024.0);
+        err.push_back(s);
+      }
+
+      if (opStack.size() == 0)
+        allowedMemory = memory;
+      else
+        opStack.setMemoryLimit(memory);
+
+      continue;
+    }
+
+    //  Thread limit, either global or per-task.
+    else if ((optStringLen > 8) &&
+             (strncmp(optString, "threads=", 8) == 0) &&
+             (isNumber(optString + 8) == true)) {
+      uint32 threads = strtouint32(optString + 8);
+
+      if (opStack.size() == 0) {
+        allowedThreads = threads;
+        omp_set_num_threads(allowedThreads);
+      }
+      else {
+        opStack.setThreadLimit(threads);
+      }
+
+      continue;
+    }
+
+    //  Segment of input, for counting from seqStore.
+#ifdef CANU
+    else if ((optStringLen > 8) &&
+             (strncmp(optString, "segment=", 8) == 0) &&
+             (isNumber(optString + 8, '/') == true)) {
+      decodeRange(optString + 8, segment, segmentMax);
+      continue;
+    }
+#endif
+
+    else if (strncmp(optString, "-V", 2) == 0) {      //  Anything that starts with -V
+      for (uint32 vv=1; vv<strlen(optString); vv++)   //  increases verbosity by the
+        merylOperation::increaseVerbosity();          //  number of letters.
+      continue;
+    }
+
+    else if (strcmp(optString, "-Q") == 0) {
+      merylOperation::beQuiet();
+      continue;
+    }
+
+    else if (strcmp(optString, "-P") == 0) {
+      merylOperation::showProgress();
+      continue;
+    }
+
+    else if (strcmp(optString, "-C") == 0) {
+      merylOperation::onlyConfigure();
+      continue;
+    }
+
+    else if (strcmp(optString, "-E") == 0) {
+      findMaxInputSizeForMemorySize(strtouint32(argv[arg+1]), (uint64)(1000000000 * strtodouble(argv[arg+2])));
+      continue;
+    }
+
+
+
+    //
+    //  Parse this word.  Decide if it's a new operation, or an output name, or an input file.
+    //
+
+    if      (0 == optStringLen)
       ;  //  Got a single bracket, nothing to do here except make it not be an error.
 
-    else if (strcmp(opt, "union") == 0)                  op = opUnion;
-    else if (strcmp(opt, "union-min") == 0)              op = opUnionMin;
-    else if (strcmp(opt, "union-max") == 0)              op = opUnionMax;
-    else if (strcmp(opt, "union-sum") == 0)              op = opUnionSum;
-    else if (strcmp(opt, "intersect") == 0)              op = opIntersect;
-    else if (strcmp(opt, "intersect-min") == 0)          op = opIntersectMin;
-    else if (strcmp(opt, "intersect-max") == 0)          op = opIntersectMax;
-    else if (strcmp(opt, "intersect-sum") == 0)          op = opIntersectSum;
-    else if (strcmp(opt, "difference") == 0)             op = opDifference;
-    else if (strcmp(opt, "symmetric-difference") == 0)   op = opSymmetricDifference;
-    else if (strcmp(opt, "complement") == 0)             op = opComplement;
+    else if (0 == strcmp(optString, "count"))                  opName = opCount;
+    else if (0 == strcmp(optString, "count-forward"))          opName = opCountForward;
+    else if (0 == strcmp(optString, "count-reverse"))          opName = opCountReverse;
 
-    //  If we see 'output', flag the next arg as being the output name.
-    //  If this arg is flagged as output, add an output using the bracket-stripped name.
-    //  If this arg is a valid meryl file, make it an input.
+    else if (0 == strcmp(optString, "less-than"))              opName = opLessThan;
+    else if (0 == strcmp(optString, "greater-than"))           opName = opGreaterThan;
+    else if (0 == strcmp(optString, "at-least"))               opName = opAtLeast;
+    else if (0 == strcmp(optString, "at-most"))                opName = opAtMost;
+    else if (0 == strcmp(optString, "equal-to"))               opName = opEqualTo;
+    else if (0 == strcmp(optString, "not-equal-to"))           opName = opNotEqualTo;
 
-    else if (strcmp(opt, "output") == 0)       outputArg = arg+1;
+    else if (0 == strcmp(optString, "increase"))               opName = opIncrease;
+    else if (0 == strcmp(optString, "decrease"))               opName = opDecrease;
+    else if (0 == strcmp(optString, "multiply"))               opName = opMultiply;
+    else if (0 == strcmp(optString, "divide"))                 opName = opDivide;
+    else if (0 == strcmp(optString, "modulo"))                 opName = opModulo;
 
-    else if (arg == outputArg)                 writer = new merylStreamWriter(opt, merSize, 0, merSize/2, false);
+    else if (0 == strcmp(optString, "union"))                  opName = opUnion;
+    else if (0 == strcmp(optString, "union-min"))              opName = opUnionMin;
+    else if (0 == strcmp(optString, "union-max"))              opName = opUnionMax;
+    else if (0 == strcmp(optString, "union-sum"))              opName = opUnionSum;
 
-    else if (AS_UTL_fileExists(mcidx) &&
-             AS_UTL_fileExists(mcdat))         reader = new merylStreamReader(opt);
+    else if (0 == strcmp(optString, "intersect"))              opName = opIntersect;
+    else if (0 == strcmp(optString, "intersect-min"))          opName = opIntersectMin;
+    else if (0 == strcmp(optString, "intersect-max"))          opName = opIntersectMax;
+    else if (0 == strcmp(optString, "intersect-sum"))          opName = opIntersectSum;
+
+    else if (0 == strcmp(optString, "difference"))             opName = opDifference;
+    else if (0 == strcmp(optString, "symmetric-difference"))   opName = opSymmetricDifference;
+
+    else if (0 == strcmp(optString, "histogram"))              opName = opHistogram;
+    else if (0 == strcmp(optString, "statistics"))              opName = opStatistics;
+
+    else if (0 == strcmp(optString, "compare"))                opName = opCompare;
+
+    //  Handle output names.
+
+    else if (0 == strcmp(optString, "output")) {          //  Flag the next arg as the output name for a database
+      outputArg = arg + 1;                                //  if we see 'output'.
+    }
+
+    else if (arg == outputArg) {                          //  If this is the output name, make a new
+      writerName = duplicateString(inoutName);            //  output writer.
+    }
+
+    //  Handle printer names.
+
+    else if (0 == strcmp(optString, "print")) {           //  Flag the next arg as the output name for printing
+      printerArg = arg + 1;                               //  if we see 'print'.
+    }
+
+    else if ((arg == printerArg) &&                       //  If this is the printer name, and not a meryl database, make
+             (fileExists(indexName) == false)) {          //  a new file to print to.  Note: this isn't triggered if the
+      printerName = duplicateString(inoutName);           //  arg is an op, the if-cascade stops when the op is parsed.
+    }
+
+    //  Handle inputs.
+
+    else if (fileExists(indexName) == true) {             //  Make a reader if the arg is a meryl database.
+      reader = new kmerCountFileReader(inoutName);
+    }
+
+    else if ((opStack.size() > 0) &&                      //  If a counting command exists, add a sequence file.
+             (opStack.isCounting()   == true) &&
+             (fileExists(inoutName)  == true)) {
+      sequence = new dnaSeqFile(inoutName);
+    }
+
+#ifdef CANU
+    else if ((opStack.size() > 0) &&                      //  If a counting command exists, add a Canu seqStore.
+             (opStack.isCounting()   == true) &&
+             (fileExists(sqInfName)  == true) &&
+             (fileExists(sqRdsName)  == true)) {
+      store = sqStore::sqStore_open(inoutName);
+    }
+#endif
 
     else {
       char *s = new char [1024];
-      snprintf(s, 1024, "Unknown option or meryl database files not found for '%s'.\n", opt);
+      snprintf(s, 1024, "Don't know what to do with '%s'.", optString);
       err.push_back(s);
     }
 
+    //
+    //  With the argument parsed, do something with it.
+    //  Order is quite important here, as they're all independent tests.
+    //
 
-    //  Create a new operation or set inputs or output.  Or do nothing.
-
-    if (op != opNothing) {
-      merylOperation *newOp = new merylOperation(op);
-
-      if (opStack.empty() == false)
-        opStack.top()->addInput(newOp);
-
-      opStack.push(newOp);
-      op = opNothing;
+    if ((arg == printerArg) &&                            //  We wanted to find a printer name here, but found
+        (printerName == NULL)) {                          //  something else; make the print go to stdout.
+      printerName = duplicateString("-");
     }
 
-    if ((writer != NULL) &&              //  If nothing on the stack, wait for an operation
-        (opStack.size() > 0)) {          //  to show up.
-      opStack.top()->addOutput(opt, writer);
-      writer = NULL;
+    if ((printerName != NULL) &&                          //  If a printer and a reader exist, but no operation,
+        (reader      != NULL) &&                          //  the user asked to just print a database.
+        (opName      == opNothing)) {                     //  Add a pass-through operation to give it
+      opName = opPassThrough;                             //  something to hang on to.
     }
 
-    if (reader != NULL) {
-      opStack.top()->addInput(opt, reader);
+    if (opName != opNothing) {                            //  Add any just-parsed command to the stack.
+      opStack.pushOp(opName,
+                     allowedThreads, allowedMemory);
+      opName = opNothing;
+    }
+
+    //
+    //  Attach outputs and inputs to the top operation on the stack.  If the stack is empty,
+    //  do nothing with the output/input this time, wait until the next argument.
+    //
+
+    if ((writerName != NULL) &&
+        (opStack.size() > 0)) {
+      opStack.addOutput(writerName);
+      delete [] writerName;
+      writerName = NULL;
+    }
+
+    if ((printerName != NULL) &&
+        (opStack.size() > 0)) {
+      opStack.addPrinter(printerName);
+      delete [] printerName;
+      printerName = NULL;
+    }
+
+    if ((reader != NULL) &&
+        (opStack.size() > 0)) {
+      opStack.addInput(reader);
       reader = NULL;
     }
 
-    //  If we're done adding inputs to the operation, load the first mer from
-    //  the inputs, and pop it off the stack.
-
-    for (; terminating > 0; terminating--) {
-      opStack.top()->nextMer();
-      opStack.pop();
+    if ((sequence != NULL) &&
+        (opStack.size() > 0)) {
+      opStack.addInput(sequence);
+      sequence = NULL;
     }
 
-    arg++;
+#ifdef CANU
+    if ((store != NULL) &&
+        (opStack.size() > 0)) {
+      opStack.addInput(store, segment, segmentMax);
+      store      = NULL;
+      segment    = 1;
+      segmentMax = 1;
+    }
+#endif
+
+    //  Finally, if we've been told to terminate the command, do so.
+
+    for (; terminating > 0; terminating--)
+      opStack.popOp();
   }
 
   //  If any errors, fail.
 
-  if (err.size() > 0) {
+  if ((argc == 1) ||        //  No commands
+      (err.size() > 0)) {   //  Errors
+    fprintf(stderr, "usage: %s ...\n", argv[0]);
+    fprintf(stderr, "\n");
+    fprintf(stderr, "  A meryl command line is formed as a series of commands and files, possibly\n");
+    fprintf(stderr, "  grouped using square brackets.  Each command operates on the file(s) that\n");
+    fprintf(stderr, "  are listed after it.\n");
+    fprintf(stderr, "\n");
+    fprintf(stderr, "  COMMANDS:\n");
+    fprintf(stderr, "\n");
+    fprintf(stderr, "    print                display kmers on the screen as 'kmer<tab>count'.  accepts exactly one input.\n");
+    fprintf(stderr, "\n");
+    fprintf(stderr, "    count                Count the occurrences of canonical kmers in the input.  must have 'output' specified.\n");
+    fprintf(stderr, "    count-forward        Count the occurrences of forward kmers in the input.  must have 'output' specified.\n");
+    fprintf(stderr, "    count-reverse        Count the occurrences of reverse kmers in the input.  must have 'output' specified.\n");
+    fprintf(stderr, "      k=<K>              create mers of size K bases (mandatory).\n");
+    fprintf(stderr, "      n=<N>              expect N mers in the input (optional; for precise memory sizing).\n");
+    fprintf(stderr, "      memory=M           use no more than (about) M GB memory.\n");
+    fprintf(stderr, "      threads=T          use no more than T threads.\n");
+    fprintf(stderr, "\n");
+    fprintf(stderr, "    less-than N          return kmers that occur fewer than N times in the input.  accepts exactly one input.\n");
+    fprintf(stderr, "    greater-than N       return kmers that occur more than N times in the input.  accepts exactly one input.\n");
+    fprintf(stderr, "    equal-to N           return kmers that occur exactly N times in the input.  accepts exactly one input.\n");
+    fprintf(stderr, "    not-equal-to N       return kmers that do not occur exactly N times in the input.  accepts exactly one input.\n");
+    fprintf(stderr, "\n");
+    fprintf(stderr, "    increase X           add X to the count of each kmer.\n");
+    fprintf(stderr, "    decrease X           subtract X from the count of each kmer.\n");
+    fprintf(stderr, "    multiply X           multiply the count of each kmer by X.\n");
+    fprintf(stderr, "    divide X             divide the count of each kmer by X.\n");
+    fprintf(stderr, "    modulo X             set the count of each kmer to the remainder of the count divided by X.\n");
+    fprintf(stderr, "\n");
+    fprintf(stderr, "    union                return kmers that occur in any input, set the count to the number of inputs with this kmer.\n");
+    fprintf(stderr, "    union-min            return kmers that occur in any input, set the count to the minimum count\n");
+    fprintf(stderr, "    union-max            return kmers that occur in any input, set the count to the maximum count\n");
+    fprintf(stderr, "    union-sum            return kmers that occur in any input, set the count to the sum of the counts\n");
+    fprintf(stderr, "\n");
+    fprintf(stderr, "    intersect            return kmers that occur in all inputs, set the count to the count in the first input.\n");
+    fprintf(stderr, "    intersect-min        return kmers that occur in all inputs, set the count to the minimum count.\n");
+    fprintf(stderr, "    intersect-max        return kmers that occur in all inputs, set the count to the maximum count.\n");
+    fprintf(stderr, "    intersect-sum        return kmers that occur in all inputs, set the count to the sum of the counts.\n");
+    fprintf(stderr, "\n");
+    fprintf(stderr, "    difference           return kmers that occur in the first input, but none of the other inputs\n");
+    fprintf(stderr, "    symmetric-difference return kmers that occur in exactly one input\n");
+    fprintf(stderr, "\n");
+    fprintf(stderr, "  MODIFIERS:\n");
+    fprintf(stderr, "\n");
+    fprintf(stderr, "    output O             write kmers generated by the present command to an output  meryl database O\n");
+    fprintf(stderr, "                         mandatory for count operations.\n");
+    fprintf(stderr, "\n");
+    fprintf(stderr, "  EXAMPLES:\n");
+    fprintf(stderr, "\n");
+    fprintf(stderr, "  Example:  Report 22-mers present in at least one of input1.fasta and input2.fasta.\n");
+    fprintf(stderr, "            Kmers from each input are saved in meryl databases 'input1' and 'input2',\n");
+    fprintf(stderr, "            but the kmers in the union are only reported to the screen.\n");
+    fprintf(stderr, "\n");
+    fprintf(stderr, "            meryl print \\\n");
+    fprintf(stderr, "                    union \\\n");
+    fprintf(stderr, "                      [count k=22 input1.fasta output input1] \\\n");
+    fprintf(stderr, "                      [count k=22 input2.fasta output input2]\n");
+    fprintf(stderr, "\n");
+    fprintf(stderr, "  Example:  Find the highest count of each kmer present in both files, save the kmers to\n");
+    fprintf(stderr, "            database 'maxCount'.\n");
+    fprintf(stderr, "\n");
+    fprintf(stderr, "            meryl intersect-max input1 input2 output maxCount\n");
+    fprintf(stderr, "\n");
+    fprintf(stderr, "  Example:  Find unique kmers common to both files.  Brackets are necessary\n");
+    fprintf(stderr, "            on the first 'equal-to' command to prevent the second 'equal-to' from\n");
+    fprintf(stderr, "            being used as an input to the first 'equal-to'.\n");
+    fprintf(stderr, "\n");
+    fprintf(stderr, "            meryl intersect [equal-to 1 input1] equal-to 1 input2\n");
+    fprintf(stderr, "\n");
+
+    for (uint32 ii=0; ii<err.size(); ii++)
+      if (err[ii] != NULL)
+        fprintf(stderr, "%s\n", err[ii]);
+
     exit(1);
   }
 
-  //  Now just walk through the kmers until nothing is left.
+  //  If nothing on the stack, nothing to do.
 
-  merylOperation *op = opStack.top();
+  if (opStack.size() == 0)
+    exit(1);
 
-  fprintf(stderr, "START operation %s\n", toString(op->getOperation()));
+  //  Pop the stack until we get back to the root operation.
 
-  while (op->nextMer() == true)
-    ;
+  while (opStack.size() > 1)
+    opStack.popOp();
 
-  //  Done!
+  //  opHistogram is limited to showing only histograms already stored in a database.
+  //  opHistogram cannot take input from anything but a database.
+  //  opHistogram does not generate kmer outputs.
+  //  So, if the top op is histogram, all we can do is load the histogram and dump it.
+  //
+  //  Eventully, maybe, opHistogram will pass through mers (but then we need to figure out
+  //  where to report the histogram).
+  //
+  //  Eventually, maybe, opHistogram will allow input from a kmer stream.
 
-  fprintf(stderr, "DONE operation %s\n", toString(op->getOperation()));
+  if (opStack.getOp(0)->getOperation() == opHistogram) {
+    opStack.getOp(0)->reportHistogram();
+    exit(0);
+  }
 
-  delete op;
+  if (opStack.getOp(0)->getOperation() == opStatistics) {
+    opStack.getOp(0)->reportStatistics();
+    exit(0);
+  }
 
+  //  Counting operations are a big headache.  They don't fit into the
+  //  tree nicely:
+  //   - they do their own threading, so only one thread can start the operation
+  //   - when done, they transform themselves into a pass-through operation that
+  //     simply reads the (just counted) input and passes kmers through.
+  //
+  //  So, we special case them here.  Process in order, counting, writing the
+  //  output, and converting to a pass-through operation.
+
+  for (uint32 opNum=0; opNum<opStack.numberOfOperations(); opNum++) {
+    merylOperation *op = opStack.getOp(opNum, 0);
+    char            name[FILENAME_MAX + 1] = { 0 };
+
+    if (op->isCounting() == false)                        //  If not a counting operation,
+      continue;                                           //  skip it.
+
+    if (op->getOutputName())                              //  Save the output name, so we
+      strncpy(name, op->getOutputName(), FILENAME_MAX);   //  know which input to open later.
+
+    op->doCounting();                                     //  Do the counting.
+
+    for (uint32 fn=0;                                     //  Convert all the files to pass
+         fn < opStack.numberOfFiles();                    //  through operations.
+         fn++)
+      opStack.getOp(opNum, fn)->convertToPassThrough(name, fn);
+  }
+
+  //  If there is an operation (debug operations and -h have no operations)
+  //  keep calling nextMer() on that top operation until there are no more mers.
+  //
+  //  op->initialize() returns false if we're only configuring, or if the top
+  //  operation on the stack is a counting operation.
+
+  uint32  nf = opStack.numberOfFiles();
+
+#pragma omp parallel for schedule(dynamic, 1)
+  for (uint32 ff=0; ff<nf; ff++) {
+    merylOperation *op = opStack.getOp(ff);
+
+    if (op->initialize() == true)
+      while (op->nextMer() == true)
+        ;
+
+    op->finalize();
+  }
+
+  //  Now that everything is done, delete!
+  //  Output presents a problem, in that everyone has a copy
+  //  of it, but only one can delete it.  This is hardcoded
+  //  in merylOperation::~merylOperation() so that only
+  //  the first one (ff==0 here) deletes the output object.
+
+  for (uint32 ff=0; ff<nf; ff++) {
+    merylOperation *op = opStack.getOp(ff);
+
+    delete op;
+  }
+
+  fprintf(stderr, "Bye.\n");
 
   return(0);
 }
-
-
-#endif

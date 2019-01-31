@@ -49,7 +49,7 @@
  */
 
 #include "overlapInCore.H"
-#include "AS_UTL_decodeRange.H"
+#include "strings.H"
 
 oicParameters  G;
 
@@ -142,7 +142,7 @@ ovFile  *Out_BOF = NULL;
 //  Allocate memory for  (* WA)  and set initial values.
 //  Set  thread_id  field to  id .
 void
-Initialize_Work_Area(Work_Area_t *WA, int id, gkStore *gkpStore) {
+Initialize_Work_Area(Work_Area_t *WA, int id, sqStore *seqStore) {
   uint64  allocated = 0;
 
   WA->String_Olap_Size  = INIT_STRING_OLAP_SIZE;
@@ -157,11 +157,11 @@ Initialize_Work_Area(Work_Area_t *WA, int id, gkStore *gkpStore) {
   WA->status     = 0;
   WA->thread_id  = id;
 
-  WA->gkpStore = gkpStore;
+  WA->seqStore = seqStore;
 
   WA->overlapsLen = 0;
   WA->overlapsMax = 1024 * 1024 / sizeof(ovOverlap);
-  WA->overlaps    = ovOverlap::allocateOverlaps(WA->gkpStore, WA->overlapsMax);
+  WA->overlaps    = ovOverlap::allocateOverlaps(WA->seqStore, WA->overlapsMax);
 
   allocated += sizeof(ovOverlap) * WA->overlapsMax;
 
@@ -191,15 +191,15 @@ OverlapDriver(void) {
 
   Work_Area_t    *thread_wa = new Work_Area_t [G.Num_PThreads];
 
-  gkStore        *gkpStore  = gkStore::gkStore_open(G.Frag_Store_Path);
+  sqStore        *seqStore  = sqStore::sqStore_open(G.Frag_Store_Path);
 
-  Out_BOF = new ovFile(gkpStore, G.Outfile_Name, ovFileFullWrite);
+  Out_BOF = new ovFile(seqStore, G.Outfile_Name, ovFileFullWrite);
 
   fprintf(stderr, "Initializing %u work areas.\n", G.Num_PThreads);
 
 #pragma omp parallel for
   for (uint32 i=0;  i<G.Num_PThreads;  i++)
-    Initialize_Work_Area(thread_wa+i, i, gkpStore);
+    Initialize_Work_Area(thread_wa+i, i, seqStore);
 
   //  Command line options are Lo_Hash_Frag and Hi_Hash_Frag
   //  Command line options are Lo_Old_Frag and Hi_Old_Frag
@@ -207,14 +207,14 @@ OverlapDriver(void) {
   if (G.bgnHashID < 1)
     G.bgnHashID = 1;
 
-  if (gkpStore->gkStore_getNumReads() < G.endHashID)
-    G.endHashID = gkpStore->gkStore_getNumReads();
+  if (seqStore->sqStore_getNumReads() < G.endHashID)
+    G.endHashID = seqStore->sqStore_getNumReads();
 
 
   //  Note distinction between the local bgn/end and the global G.bgn/G.end.
 
   uint32  bgnHashID = G.bgnHashID;
-  uint32  endHashID = G.bgnHashID + G.Max_Hash_Strings - 1;  //  Inclusive!
+  uint32  endHashID = G.endHashID;
 
   //  Iterate over read blocks, build a hash table, then search in threads.
 
@@ -224,20 +224,20 @@ OverlapDriver(void) {
 
     assert(0          <  bgnHashID);
     assert(bgnHashID  <= endHashID);
-    assert(endHashID  <= gkpStore->gkStore_getNumReads());
+    assert(endHashID  <= seqStore->sqStore_getNumReads());
 
     //  Load as much as we can.  If we load less than expected, the endHashID is updated to reflect
     //  the last read loaded.
 
-    endHashID = Build_Hash_Index(gkpStore, bgnHashID, endHashID);
+    endHashID = Build_Hash_Index(seqStore, bgnHashID, endHashID);
 
     //  Decide the range of reads to process.  No more than what is loaded in the table.
 
     if (G.bgnRefID < 1)
       G.bgnRefID = 1;
 
-    if (G.endRefID > gkpStore->gkStore_getNumReads())
-      G.endRefID = gkpStore->gkStore_getNumReads();
+    if (G.endRefID > seqStore->sqStore_getNumReads())
+      G.endRefID = seqStore->sqStore_getNumReads();
 
     G.curRefID = G.bgnRefID;
 
@@ -249,7 +249,7 @@ OverlapDriver(void) {
 
     fprintf(stderr, "\n");
     fprintf(stderr, "Range: %u-%u.  Store has %u reads.\n",
-            G.bgnRefID, G.endRefID, gkpStore->gkStore_getNumReads());
+            G.bgnRefID, G.endRefID, seqStore->sqStore_getNumReads());
     fprintf(stderr, "Chunk: " F_U32 " reads/thread -- (G.endRefID=" F_U32 " - G.bgnRefID=" F_U32 ") / G.Num_PThreads=" F_U32 " / 8\n",
             G.perThread, G.endRefID, G.bgnRefID, G.Num_PThreads);
 
@@ -282,12 +282,12 @@ OverlapDriver(void) {
 
     //  Prepare for another hash table iteration.
     bgnHashID = endHashID + 1;
-    endHashID = bgnHashID + G.Max_Hash_Strings - 1;  //  Inclusive!
+    endHashID = G.endHashID;
   }
 
   delete Out_BOF;
 
-  gkpStore->gkStore_close();
+  seqStore->sqStore_close();
 
   for (uint32 i=0;  i<G.Num_PThreads;  i++)
     Delete_Work_Area(thread_wa + i);
@@ -312,32 +312,29 @@ main(int argc, char **argv) {
   int err=0;
   int arg=1;
   while (arg < argc) {
-    if        (strcmp(argv[arg], "-G") == 0) {
-      G.Doing_Partial_Overlaps = TRUE;
+    if        (strcmp(argv[arg], "-partial") == 0) {
+      G.Doing_Partial_Overlaps = true;
 
     } else if (strcmp(argv[arg], "-h") == 0) {
-      AS_UTL_decodeRange(argv[++arg], G.bgnHashID, G.endHashID);
+      decodeRange(argv[++arg], G.bgnHashID, G.endHashID);
 
     } else if (strcmp(argv[arg], "-H") == 0) {
-      AS_UTL_decodeRange(argv[++arg], G.minLibToHash, G.maxLibToHash);
+      decodeRange(argv[++arg], G.minLibToHash, G.maxLibToHash);
 
     } else if (strcmp(argv[arg], "-r") == 0) {
-      AS_UTL_decodeRange(argv[++arg], G.bgnRefID, G.endRefID);
+      decodeRange(argv[++arg], G.bgnRefID, G.endRefID);
 
     } else if (strcmp(argv[arg], "-R") == 0) {
-      AS_UTL_decodeRange(argv[++arg], G.minLibToRef, G.maxLibToRef);
+      decodeRange(argv[++arg], G.minLibToRef, G.maxLibToRef);
 
     } else if (strcmp(argv[arg], "-k") == 0) {
       arg++;
+
       if ((isdigit(argv[arg][0]) && (argv[arg][1] == 0)) ||
-          (isdigit(argv[arg][0]) && isdigit(argv[arg][1]) && (argv[arg][2] == 0))) {
+          (isdigit(argv[arg][0]) && isdigit(argv[arg][1]) && (argv[arg][2] == 0)))
         G.Kmer_Len = strtoull(argv[arg], NULL, 10);
-      } else {
-        errno = 0;
-        G.Kmer_Skip_File = fopen(argv[arg], "r");
-        if (errno)
-          fprintf(stderr, "ERROR: Failed to open -k '%s': %s\n", argv[arg], strerror(errno)), exit(1);
-      }
+      else
+        G.kmerSkipFileName = argv[arg];
 
     } else if (strcmp(argv[arg], "-l") == 0) {
       G.Frag_Olap_Limit = strtol(argv[++arg], NULL, 10);
@@ -345,21 +342,32 @@ main(int argc, char **argv) {
         G.Frag_Olap_Limit = UINT64_MAX;
 
     } else if (strcmp(argv[arg], "-m") == 0) {
-      G.Unique_Olap_Per_Pair = FALSE;
+      G.Unique_Olap_Per_Pair = false;
     } else if (strcmp(argv[arg], "-u") == 0) {
-      G.Unique_Olap_Per_Pair = TRUE;
+      G.Unique_Olap_Per_Pair = true;
 
     } else if (strcmp(argv[arg], "--hashbits") == 0) {
       G.Hash_Mask_Bits = strtoull(argv[++arg], NULL, 10);
-
-    } else if (strcmp(argv[arg], "--hashstrings") == 0) {
-      G.Max_Hash_Strings = strtoull(argv[++arg], NULL, 10);
 
     } else if (strcmp(argv[arg], "--hashdatalen") == 0) {
       G.Max_Hash_Data_Len = strtoull(argv[++arg], NULL, 10);
 
     } else if (strcmp(argv[arg], "--hashload") == 0) {
       G.Max_Hash_Load = atof(argv[++arg]);
+
+#if 0
+    //  This should still work, but not useful unless String_Ref_t is
+    //  changed to uint32.
+    //
+    //fprintf(stderr, "--maxreadlen n     For batches with all short reads, pack bits differently to\n");
+    //fprintf(stderr, "                   process more reads per batch.\n");
+    //fprintf(stderr, "                     all reads must be shorter than n\n");
+    //fprintf(stderr, "                     limited to 2^(30-m) reads\n");
+    //fprintf(stderr, "                   Common values:\n");
+    //fprintf(stderr, "                     maxreadlen 2048->hashstrings  524288 (default)\n");
+    //fprintf(stderr, "                     maxreadlen  512->hashstrings 2097152\n");
+    //fprintf(stderr, "                     maxreadlen  128->hashstrings 8388608\n");
+    //fprintf(stderr, "\n");
 
     } else if (strcmp(argv[arg], "--maxreadlen") == 0) {
       //  Quite the gross way to do this, but simple.
@@ -374,6 +382,7 @@ main(int argc, char **argv) {
       OFFSET_MASK           = (1 << OFFSET_BITS) - 1;
 
       MAX_STRING_NUM        = STRING_NUM_MASK;
+#endif
 
     } else if (strcmp(argv[arg], "-o") == 0) {
       G.Outfile_Name = argv[++arg];
@@ -393,7 +402,7 @@ main(int argc, char **argv) {
       G.maxErate = strtof(argv[++arg], NULL);
 
     } else if (strcmp(argv[arg], "-z") == 0) {
-      G.Use_Hopeless_Check = FALSE;
+      G.Use_Hopeless_Check = false;
 
     } else {
       if (G.Frag_Store_Path == NULL) {
@@ -409,27 +418,21 @@ main(int argc, char **argv) {
   //  Fix up some flags if we're allowing high error rates.
   //
   if (G.maxErate > 0.06)
-    G.Use_Hopeless_Check = FALSE;
-
-  if (G.Max_Hash_Strings == 0)
-    fprintf(stderr, "* No memory model supplied; -M needed!\n"), err++;
+    G.Use_Hopeless_Check = false;
 
   if (G.Kmer_Len == 0)
     fprintf(stderr, "* No kmer length supplied; -k needed!\n"), err++;
-
-  if (G.Max_Hash_Strings > MAX_STRING_NUM)
-    fprintf(stderr, "Too many strings (--hashstrings), must be less than " F_U64 "\n", MAX_STRING_NUM), err++;
 
   if (G.Outfile_Name == NULL)
     fprintf (stderr, "ERROR:  No output file name specified\n"), err++;
 
   if ((err) || (G.Frag_Store_Path == NULL)) {
-    fprintf(stderr, "USAGE:  %s [options] <gkpStorePath>\n", argv[0]);
+    fprintf(stderr, "USAGE:  %s [options] <seqStorePath>\n", argv[0]);
     fprintf(stderr, "\n");
     fprintf(stderr, "-b <fn>     in contig mode, specify the output file\n");
     fprintf(stderr, "-c          contig mode.  Use 2 frag stores.  First is\n");
     fprintf(stderr, "            for reads; second is for contigs\n");
-    fprintf(stderr, "-G          do partial overlaps\n");
+    fprintf(stderr, "-partial    do partial overlaps\n");
     fprintf(stderr, "-h <range>  to specify fragments to put in hash table\n");
     fprintf(stderr, "            Implies LSF mode (no changes to frag store)\n");
     fprintf(stderr, "-I          designate a file of frag iids to limit olaps to\n");
@@ -443,7 +446,7 @@ main(int argc, char **argv) {
     fprintf(stderr, "-M          specify memory size.  Valid values are '8GB', '4GB',\n");
     fprintf(stderr, "            '2GB', '1GB', '256MB'.  (Not for Contig mode)\n");
     fprintf(stderr, "-o          specify output file name\n");
-    fprintf(stderr, "-P          write protoIO output (if not -G)\n");
+    fprintf(stderr, "-P          write protoIO output (if not -partial)\n");
     fprintf(stderr, "-r <range>  specify old fragments to overlap\n");
     fprintf(stderr, "-t <n>      use <n> parallel threads\n");
     fprintf(stderr, "-u          allow only 1 overlap per oriented fragment pair\n");
@@ -453,18 +456,8 @@ main(int argc, char **argv) {
     fprintf(stderr, "--minlength <n>    only output overlaps of <n> or more bases\n");
     fprintf(stderr, "\n");
     fprintf(stderr, "--hashbits n       Use n bits for the hash mask.\n");
-    fprintf(stderr, "--hashstrings n    Load at most n strings into the hash table at one time.\n");
     fprintf(stderr, "--hashdatalen n    Load at most n bytes into the hash table at one time.\n");
     fprintf(stderr, "--hashload f       Load to at most 0.0 < f < 1.0 capacity (default 0.7).\n");
-    fprintf(stderr, "\n");
-    fprintf(stderr, "--maxreadlen n     For batches with all short reads, pack bits differently to\n");
-    fprintf(stderr, "                   process more reads per batch.\n");
-    fprintf(stderr, "                     all reads must be shorter than n\n");
-    fprintf(stderr, "                     --hashstrings limited to 2^(30-m)\n");
-    fprintf(stderr, "                   Common values:\n");
-    fprintf(stderr, "                     maxreadlen 2048->hashstrings  524288 (default)\n");
-    fprintf(stderr, "                     maxreadlen  512->hashstrings 2097152\n");
-    fprintf(stderr, "                     maxreadlen  128->hashstrings 8388608\n");
     fprintf(stderr, "\n");
     fprintf(stderr, "--readsperbatch n  Force batch size to n.\n");
     fprintf(stderr, "--readsperthread n Force each thread to process n reads.\n");
@@ -483,22 +476,25 @@ main(int argc, char **argv) {
   //  Log parameters.
 
   fprintf(stderr, "\n");
-  fprintf(stderr, "STRING_NUM_BITS       " F_U32 "\n", STRING_NUM_BITS);
-  fprintf(stderr, "OFFSET_BITS           " F_U32 "\n", OFFSET_BITS);
-  fprintf(stderr, "STRING_NUM_MASK       " F_U64 "\n", STRING_NUM_MASK);
-  fprintf(stderr, "OFFSET_MASK           " F_U64 "\n", OFFSET_MASK);
-  fprintf(stderr, "MAX_STRING_NUM        " F_U64 "\n", MAX_STRING_NUM);
+  fprintf(stderr, "STRING_NUM_BITS          " F_U32 "\n", STRING_NUM_BITS);
+  fprintf(stderr, "OFFSET_BITS              " F_U32 "\n", OFFSET_BITS);
+  fprintf(stderr, "STRING_NUM_MASK          " F_U64 "\n", STRING_NUM_MASK);
+  fprintf(stderr, "OFFSET_MASK              " F_U64 "\n", OFFSET_MASK);
+  fprintf(stderr, "MAX_STRING_NUM           " F_U64 "\n", MAX_STRING_NUM);
   fprintf(stderr, "\n");
-  fprintf(stderr, "Hash_Mask_Bits        " F_U32 "\n", G.Hash_Mask_Bits);
-  fprintf(stderr, "Max_Hash_Strings      " F_U32 "\n", G.Max_Hash_Strings);
-  fprintf(stderr, "Max_Hash_Data_Len     " F_U64 "\n", G.Max_Hash_Data_Len);
-  fprintf(stderr, "Max_Hash_Load         %f\n", G.Max_Hash_Load);
-  fprintf(stderr, "Kmer Length           " F_U64 "\n", G.Kmer_Len);
-  fprintf(stderr, "Min Overlap Length    %d\n", G.Min_Olap_Len);
-  fprintf(stderr, "Max Error Rate        %f\n", G.maxErate);
-  fprintf(stderr, "Min Kmer Matches      " F_U64 "\n", G.Filter_By_Kmer_Count);
+  fprintf(stderr, "Hash_Mask_Bits           " F_U32 "\n", G.Hash_Mask_Bits);
+
+  fprintf(stderr, "bgnHashID                " F_U32 "\n", G.bgnHashID);
+  fprintf(stderr, "bgnHashID                " F_U32 "\n", G.endHashID);
+
+  fprintf(stderr, "Max_Hash_Data_Len        " F_U64 "\n", G.Max_Hash_Data_Len);
+  fprintf(stderr, "Max_Hash_Load            %f\n", G.Max_Hash_Load);
+  fprintf(stderr, "Kmer Length              " F_U64 "\n", G.Kmer_Len);
+  fprintf(stderr, "Min Overlap Length       %d\n", G.Min_Olap_Len);
+  fprintf(stderr, "Max Error Rate           %f\n", G.maxErate);
+  fprintf(stderr, "Min Kmer Matches         " F_U64 "\n", G.Filter_By_Kmer_Count);
   fprintf(stderr, "\n");
-  fprintf(stderr, "Num_PThreads          " F_U32 "\n", G.Num_PThreads);
+  fprintf(stderr, "Num_PThreads             " F_U32 "\n", G.Num_PThreads);
 
   omp_set_num_threads(G.Num_PThreads);
 
@@ -519,27 +515,28 @@ main(int argc, char **argv) {
   }
 
   fprintf(stderr, "\n");
-  fprintf(stderr, "HASH_TABLE_SIZE         " F_U64 "\n",     HASH_TABLE_SIZE);
-  fprintf(stderr, "sizeof(Hash_Bucket_t)   " F_U64 "\n",  (uint64)sizeof(Hash_Bucket_t));
-  fprintf(stderr, "hash table size:        " F_U64 " MB\n",  (HASH_TABLE_SIZE * sizeof(Hash_Bucket_t)) >> 20);
+  fprintf(stderr, "sizeof(Hash_Bucket_t)    " F_U64 "\n",     (uint64)sizeof(Hash_Bucket_t));
+  fprintf(stderr, "sizeof(Check_Vector_t)   " F_U64 "\n",     (uint64)sizeof(Check_Vector_t));
+  fprintf(stderr, "sizeof(Hash_Frag_Info_t) " F_U64 "\n",     (uint64)sizeof(Hash_Frag_Info_t));
+  fprintf(stderr, "\n");
+  fprintf(stderr, "HASH_TABLE_SIZE          " F_U64 "\n",     HASH_TABLE_SIZE);
+  fprintf(stderr, "\n");
+  fprintf(stderr, "hash table size:         " F_U64    " MB\n", (HASH_TABLE_SIZE * sizeof(Hash_Bucket_t)) >> 20);
+  fprintf(stderr, "hash check array         " F_U64    " MB\n", (HASH_TABLE_SIZE    * sizeof (Check_Vector_t))   >> 20);
+  fprintf(stderr, "string info              " F_SIZE_T " MB\n", ((G.endHashID - G.bgnHashID + 1) * sizeof (Hash_Frag_Info_t)) >> 20);
+  fprintf(stderr, "string start             " F_SIZE_T " MB\n", ((G.endHashID - G.bgnHashID + 1) * sizeof (int64))            >> 20);
   fprintf(stderr, "\n");
 
-  Hash_Table       = new Hash_Bucket_t [HASH_TABLE_SIZE];
+  Hash_Table       = new Hash_Bucket_t    [HASH_TABLE_SIZE];
+  Hash_Check_Array = new Check_Vector_t   [HASH_TABLE_SIZE];
+  String_Info      = new Hash_Frag_Info_t [G.endHashID - G.bgnHashID + 1];
+  String_Start     = new int64            [G.endHashID - G.bgnHashID + 1];
 
-  fprintf(stderr, "check  " F_U64    " MB\n", ((HASH_TABLE_SIZE    * sizeof (Check_Vector_t))   >> 20));
-  fprintf(stderr, "info   " F_SIZE_T " MB\n", ((G.Max_Hash_Strings * sizeof (Hash_Frag_Info_t)) >> 20));
-  fprintf(stderr, "start  " F_SIZE_T " MB\n", ((G.Max_Hash_Strings * sizeof (int64))            >> 20));
-  fprintf(stderr, "\n");
-
-  Hash_Check_Array = new Check_Vector_t [HASH_TABLE_SIZE];
-  String_Info      = new Hash_Frag_Info_t [G.Max_Hash_Strings];
-  String_Start     = new int64 [G.Max_Hash_Strings];
-
-  String_Start_Size = G.Max_Hash_Strings;
+  String_Start_Size = G.endHashID - G.bgnHashID + 1;
 
   memset(Hash_Check_Array, 0, sizeof(Check_Vector_t)   * HASH_TABLE_SIZE);
-  memset(String_Info,      0, sizeof(Hash_Frag_Info_t) * G.Max_Hash_Strings);
-  memset(String_Start,     0, sizeof(int64)            * G.Max_Hash_Strings);
+  memset(String_Info,      0, sizeof(Hash_Frag_Info_t) * (G.endHashID - G.bgnHashID + 1));
+  memset(String_Start,     0, sizeof(int64)            * (G.endHashID - G.bgnHashID + 1));
 
 
 

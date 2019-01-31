@@ -32,7 +32,11 @@
 
 #include "AS_global.H"
 
-#include "gkStore.H"
+#include "sqStore.H"
+#include "bits.H"
+
+#include <map>
+using namespace std;
 
 
 typedef enum {
@@ -244,7 +248,7 @@ public:
   uint32              _layoutLen;
   uint32              _gappedLen;
   uint32              _childrenLen;
-  uint32              _childDeltasLen;
+  uint32              _childDeltaBitsLen;
 };
 
 
@@ -313,6 +317,18 @@ public:
   void                 dumpLayout(FILE *F);
   bool                 loadLayout(FILE *F);
 
+  //  Save and load a package of data needed to process this tig.
+
+  void                 exportData(FILE                       *exportDataFile,
+                                  sqStore                    *seqStore,
+                                  bool                        isForCorrection);
+  bool                 importData(FILE                       *importDataFile,
+                                  map<uint32, sqRead *>      &reads,
+                                  map<uint32, sqReadData *>  &datas,
+                                  FILE                       *layoutOutput,
+                                  FILE                       *sequenceOutput);
+
+
   void                 reverseComplement(void);  //  Does NOT update childDeltas
 
   void                 dumpFASTA(FILE *F, bool useGapped);
@@ -320,7 +336,7 @@ public:
 
   //  There are two multiAlign displays; this one, and one in abMultiAlign.
   void                 display(FILE     *F,
-                               gkStore  *gkp,
+                               sqStore  *seq,
                                uint32    displayWidth    = 100,    //  Width of display
                                uint32    displaySpacing  = 3,      //  Space between reads on the same line
                                bool      withQV          = false,
@@ -366,13 +382,13 @@ public:
   uint32              _childrenLen;
   uint32              _childrenMax;
 
-  int32              *_childDeltas;       //  deltas for all objects in the _children list
-  uint32              _childDeltasLen;
-  uint32              _childDeltasMax;
+  uint32              _childDeltaBitsLen;
+  stuffedBits        *_childDeltaBits;
 
   //  Flags for computing consensus/multialignments
 
   uint32              _utgcns_verboseLevel;
 };
+
 
 #endif

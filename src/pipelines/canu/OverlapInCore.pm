@@ -40,15 +40,19 @@ package canu::OverlapInCore;
 require Exporter;
 
 @ISA    = qw(Exporter);
-@EXPORT = qw(overlapConfigure overlap overlapCheck);
+@EXPORT = qw(overlapConfigure overlapCheck);
 
 use strict;
+use warnings "all";
+no  warnings "uninitialized";
 
 use File::Path 2.08 qw(make_path remove_tree);
 
 use canu::Defaults;
 use canu::Execution;
+
 use canu::Report;
+
 use canu::Grid_Cloud;
 
 
@@ -74,7 +78,6 @@ sub overlapConfigure ($$$) {
     fetchFile("$path/overlap.sh");
     fetchFile("$path/ovljob.files");
 
-    goto allDone   if (skipStage($asm, "$tag-overlapConfigure") == 1);
     goto allDone   if (fileExists("$path/overlap.sh") && fileExists("$path/$asm.partition.ovlbat") && fileExists("$path/$asm.partition.ovljob") && fileExists("$path/$asm.partition.ovlopt"));
     goto allDone   if (fileExists("$path/ovljob.files"));
     goto allDone   if (-e "$base/$asm.ovlStore");
@@ -110,7 +113,7 @@ sub overlapConfigure ($$$) {
         #my $refLibrary         = getGlobal("${tag}RefLibrary");      #  -R $refLibrary
 
         $cmd  = "$bin/overlapInCorePartition \\\n";
-        $cmd .= " -G  ../$asm.gkpStore \\\n";
+        $cmd .= " -S  ../../$asm.seqStore \\\n";
         $cmd .= " -hl " . getGlobal("${tag}OvlHashBlockLength") . " \\\n";
         $cmd .= " -rl " . getGlobal("${tag}OvlRefBlockLength")  . " \\\n";
         $cmd .= " -ol " . getGlobal("minOverlapLength") . " \\\n";
@@ -160,7 +163,7 @@ sub overlapConfigure ($$$) {
         print F getBinDirectoryShellCode();
         print F "\n";
         print F setWorkDirectoryShellCode($path);
-        print F fetchStoreShellCode("$base/$asm.gkpStore", "$base/1-overlapper", "");
+        print F fetchSeqStoreShellCode($asm, $path, "");
         print F "\n";
         print F getJobIDShellCode();
         print F "\n";
@@ -179,18 +182,19 @@ sub overlapConfigure ($$$) {
         print F "  mkdir ./\$bat\n";
         print F "fi\n";
         print F "\n";
-        print F fileExistsShellCode("./\$job.ovb");
+        print F fileExistsShellCode("exists", $path, "\$job.ovb");
+        print F "if [ \$exists = true ] ; then\n";
         print F "  echo Job previously completed successfully.\n";
         print F "  exit\n";
         print F "fi\n";
         print F "\n";
-        print F fetchFileShellCode("$base/0-mercounts", "$asm.ms$merSize.frequentMers.fasta", "");
+        print F fetchFileShellCode("$base/0-mercounts", "$asm.ms$merSize.dump", "");
         print F "\n";
         print F "\$bin/overlapInCore \\\n";
-        print F "  -G \\\n"  if ($type eq "partial");
+        print F "  -partial \\\n"  if ($type eq "partial");
         print F "  -t ", getGlobal("${tag}OvlThreads"), " \\\n";
         print F "  -k $merSize \\\n";
-        print F "  -k ../0-mercounts/$asm.ms$merSize.frequentMers.fasta \\\n";
+        print F "  -k ../0-mercounts/$asm.ms$merSize.dump \\\n";
         print F "  --hashbits $hashBits \\\n";
         print F "  --hashload $hashLoad \\\n";
         print F "  --maxerate  ", getGlobal("corOvlErrorRate"), " \\\n"  if ($tag eq "cor");   #  Explicitly using proper name for grepability.
@@ -203,12 +207,12 @@ sub overlapConfigure ($$$) {
         print F "  -s ./\$job.stats \\\n";
         #print F "  -H $hashLibrary \\\n" if ($hashLibrary ne "0");
         #print F "  -R $refLibrary \\\n"  if ($refLibrary  ne "0");
-        print F "  ../$asm.gkpStore \\\n";
+        print F "  ../../$asm.seqStore \\\n";
         print F "&& \\\n";
         print F "mv ./\$job.ovb.WORKING ./\$job.ovb\n";
         print F "\n";
-        print F stashFileShellCode("$base/1-overlapper/", "\$job.ovb", "");
-        print F stashFileShellCode("$base/1-overlapper/", "\$job.counts", "");
+        print F stashFileShellCode("$base/1-overlapper/", "\$job.ovb",   "");
+        print F stashFileShellCode("$base/1-overlapper/", "\$job.oc",    "");
         print F stashFileShellCode("$base/1-overlapper/", "\$job.stats", "");
         print F "\n";
         print F "exit 0\n";
@@ -232,7 +236,8 @@ sub overlapConfigure ($$$) {
     print STDERR "-- Configured $numJobs overlapInCore jobs.\n";
 
   finishStage:
-    emitStage($asm, "$tag-overlapConfigure");
+    generateReport($asm);
+    resetIteration("$tag-overlapConfigure");
 
   allDone:
     stopAfter("overlapConfigure");
@@ -326,7 +331,6 @@ sub overlapCheck ($$$) {
 
     $path = "$base/1-overlapper";
 
-    goto allDone   if (skipStage($asm, "$tag-overlapCheck", $attempt) == 1);
     goto allDone   if (fileExists("$path/ovljob.files"));
     goto allDone   if (-e "$base/$asm.ovlStore");
     goto allDone   if (fileExists("$base/$asm.ovlStore.tar"));
@@ -350,25 +354,25 @@ sub overlapCheck ($$$) {
                 push @successJobs, "1-overlapper/$1.ovb.gz\n";   #  Dumped to a file, so include \n
                 push @statsJobs,   "1-overlapper/$1.stats";      #  Used here, don't include \n
                 push @miscJobs,    "1-overlapper/$1.stats\n";
-                push @miscJobs,    "1-overlapper/$1.counts\n";
+                push @miscJobs,    "1-overlapper/$1.oc\n";
 
             } elsif (fileExists("$path/$1.ovb")) {
                 push @successJobs, "1-overlapper/$1.ovb\n";
                 push @statsJobs,   "1-overlapper/$1.stats";
                 push @miscJobs,    "1-overlapper/$1.stats\n";
-                push @miscJobs,    "1-overlapper/$1.counts\n";
+                push @miscJobs,    "1-overlapper/$1.oc\n";
 
             } elsif (fileExists("$path/$1.ovb.bz2")) {
                 push @successJobs, "1-overlapper/$1.ovb.bz2\n";
                 push @statsJobs,   "1-overlapper/$1.stats";
                 push @miscJobs,    "1-overlapper/$1.stats\n";
-                push @miscJobs,    "1-overlapper/$1.counts\n";
+                push @miscJobs,    "1-overlapper/$1.oc\n";
 
             } elsif (fileExists("$path/$1.ovb.xz")) {
                 push @successJobs, "1-overlapper/$1.ovb.xz\n";
                 push @statsJobs,   "1-overlapper/$1.stats";
                 push @miscJobs,    "1-overlapper/$1.stats\n";
-                push @miscJobs,    "1-overlapper/$1.counts\n";
+                push @miscJobs,    "1-overlapper/$1.oc\n";
 
             } else {
                 $failureMessage .= "--   job $path/$1.ovb FAILED.\n";
@@ -404,7 +408,7 @@ sub overlapCheck ($$$) {
 
         #  Otherwise, run some jobs.
 
-        emitStage($asm, "$tag-overlapCheck", $attempt);
+        generateReport($asm);
 
         submitOrRunParallelJob($asm, "${tag}ovl", $path, "overlap", @failedJobs);
         return;
@@ -426,7 +430,8 @@ sub overlapCheck ($$$) {
 
     reportOverlapStats($base, $asm, @statsJobs);
 
-    emitStage($asm, "$tag-overlapCheck");
+    generateReport($asm);
+    resetIteration("$tag-overlapCheck");
 
   allDone:
     stopAfter("overlap");

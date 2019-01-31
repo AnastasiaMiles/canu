@@ -33,8 +33,8 @@
  */
 
 #include "aligners.H"
-#include "gkStore.H"  //  For AS_MAX_READLEN
-#include "AS_UTL_reverseComplement.H"
+#include "sqStore.H"  //  For AS_MAX_READLEN
+#include "sequence.H"
 
 
 

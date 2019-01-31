@@ -37,129 +37,90 @@
 
 #include "AS_global.H"
 
-#include "gkStore.H"
+#include "sqStore.H"
 #include "ovStore.H"
+#include "ovStoreConfig.H"
 
 
 
 int
 main(int argc, char **argv) {
-  char           *storePath    = NULL;
-  uint32          fileLimit    = 0;         //  Number of 'slices' from bucketizer
-
-  bool            deleteIntermediates = true;
-
-  bool            doExplicitTest = false;
-  bool            doFixes        = false;
-
-  char            name[FILENAME_MAX];
+  char           *ovlName     = NULL;
+  char           *seqName     = NULL;
+  char           *cfgName     = NULL;
+  bool            deleteInter = false;
 
   argc = AS_configure(argc, argv);
 
-  int err=0;
-  int arg=1;
+  vector<char *>  err;
+  int             arg=1;
   while (arg < argc) {
     if        (strcmp(argv[arg], "-O") == 0) {
-      storePath = argv[++arg];
+      ovlName = argv[++arg];
 
-    } else if (strcmp(argv[arg], "-F") == 0) {
-      fileLimit = atoi(argv[++arg]);
+    } else if (strcmp(argv[arg], "-S") == 0) {    //  Yup, not used, but left in
+      seqName = argv[++arg];                      //  so it's the same as the others.
 
-    } else if (strcmp(argv[arg], "-f") == 0) {
-      doFixes = true;
+    } else if (strcmp(argv[arg], "-C") == 0) {
+      cfgName = argv[++arg];
 
-    } else if (strcmp(argv[arg], "-t") == 0) {
-      doExplicitTest = true;
-      storePath = argv[++arg];
-
-    } else if (strcmp(argv[arg], "-nodelete") == 0) {
-      deleteIntermediates = false;
+    } else if (strcmp(argv[arg], "-delete") == 0) {
+      deleteInter = true;
 
     } else {
-      fprintf(stderr, "ERROR: unknown option '%s'\n", argv[arg]);
-      err++;
+      char *s = new char [1024];
+      snprintf(s, 1024, "%s: unknown option '%s'.\n", argv[0], argv[arg]);
+      err.push_back(s);
     }
 
     arg++;
   }
-  if (storePath == NULL)
-    err++;
-  if ((fileLimit == 0) && (doExplicitTest == false))
-    err++;
 
-  if (err) {
-    fprintf(stderr, "usage: %s ...\n", argv[0]);
-    fprintf(stderr, "  -O x.ovlStore    path to overlap store to build the final index for\n");
-    fprintf(stderr, "  -F s             number of slices used in bucketizing/sorting\n");
+  if (ovlName == NULL)
+    err.push_back("ERROR: No overlap store (-O) supplied.\n");
+
+  if (seqName == NULL)
+    err.push_back("ERROR: No sequence store (-S) supplied.\n");
+
+  if (cfgName == NULL)
+    err.push_back("ERROR: No config (-C) supplied.\n");
+
+  if (err.size() > 0) {
+    fprintf(stderr, "usage: %s -O asm.ovlStore -S asm.seqStore -C ovStoreConfig [options]\n", argv[0]);
+    fprintf(stderr, "  -O asm.ovlStore    path to overlap store to create\n");
+    fprintf(stderr, "  -S asm.seqStore    path to sequence store\n");
+    fprintf(stderr, "  -C config          path to ovStoreConfig configuration file\n");
     fprintf(stderr, "\n");
-    fprintf(stderr, "  -t x.ovlStore    explicitly test a previously constructed index\n");
-    fprintf(stderr, "  -f               when testing, also create a new 'idx.fixed' which might\n");
-    fprintf(stderr, "                   resolve rare problems\n");
-    fprintf(stderr, "\n");
-    fprintf(stderr, "  -nodelete        do not remove intermediate files when the index is\n");
+    fprintf(stderr, "  -delete          remove intermediate files when the index is\n");
     fprintf(stderr, "                   successfully created\n");
     fprintf(stderr, "\n");
-    fprintf(stderr, "    DANGER    DO NOT USE     DO NOT USE     DO NOT USE    DANGER\n");
-    fprintf(stderr, "    DANGER                                                DANGER\n");
-    fprintf(stderr, "    DANGER   This command is difficult to run by hand.    DANGER\n");
-    fprintf(stderr, "    DANGER          Use ovStoreCreate instead.            DANGER\n");
-    fprintf(stderr, "    DANGER                                                DANGER\n");
-    fprintf(stderr, "    DANGER    DO NOT USE     DO NOT USE     DO NOT USE    DANGER\n");
-    fprintf(stderr, "\n");
 
-    if (storePath == NULL)
-      fprintf(stderr, "ERROR: No overlap store (-O) supplied.\n");
-    if ((fileLimit == 0) && (doExplicitTest == false))
-      fprintf(stderr, "ERROR: One of -F (number of slices) or -t (test a store) must be supplied.\n");
+    for (uint32 ii=0; ii<err.size(); ii++)
+      if (err[ii])
+        fputs(err[ii], stderr);
 
     exit(1);
   }
 
-  //  Do the test, and maybe fix things up.
-
-  //gkStore        *gkp    = gkStore::gkStore_open(gkpName);
-  ovStoreWriter  *writer = new ovStoreWriter(storePath, NULL, fileLimit, 0, 0);
-
-  if (doExplicitTest == true) {
-    bool  passed = writer->testIndex(doFixes);
-    if (passed == true)
-      fprintf(stderr, "Index looks correct.\n");
-    delete writer;
-    exit(passed == false);
-  }
-
-  //  Check that all segments are present.  Every segment should have an info file.
+  sqStore             *seq    = sqStore::sqStore_open(seqName);
+  ovStoreConfig       *config = new ovStoreConfig(cfgName);
+  ovStoreSliceWriter  *writer = new ovStoreSliceWriter(ovlName, seq, 0, config->numSlices(), config->numBuckets());
 
   writer->checkSortingIsComplete();
-
-  //  Merge the indices and histogram data.
-
   writer->mergeInfoFiles();
   writer->mergeHistogram();
 
-  //  Diagnostics.
+  if (deleteInter == true)
+    writer->removeAllIntermediateFiles();
 
-  if (writer->testIndex(false) == false) {
-    fprintf(stderr, "ERROR: index failed tests.\n");
-    delete writer;
-    exit(1);
-  }
+  delete writer;
+  delete config;
 
-  //  Remove intermediates.  For the buckets, we keep going until there are 10 in a row not present.
-  //  During testing, on a microbe using 2850 buckets, some buckets were empty.
-
-  if (deleteIntermediates == false) {
-    fprintf(stderr, "\n");
-    fprintf(stderr, "Not removing intermediate files.  Finished.\n");
-    exit(0);
-  }
+  seq->sqStore_close();
 
   fprintf(stderr, "\n");
-  fprintf(stderr, "Removing intermediate files.\n");
-
-  writer->removeAllIntermediateFiles();
-
   fprintf(stderr, "Success!\n");
+  fprintf(stderr, "\n");
 
   exit(0);
 }

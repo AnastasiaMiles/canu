@@ -35,10 +35,15 @@ require Exporter;
 @EXPORT = qw(detectLSF configureLSF);
 
 use strict;
+use warnings "all";
+no  warnings "uninitialized";
 
 use canu::Defaults;
 use canu::Execution;
-use canu::Grid;
+
+use canu::Grid "formatAllowedResources";
+
+
 
 sub detectLSF () {
 
@@ -63,9 +68,7 @@ sub configureLSF () {
     setGlobalIfUndef("gridEngineArrayName",                  "ARRAY_NAME\[ARRAY_JOBS\]");
     setGlobalIfUndef("gridEngineArrayMaxJobs",               65535);
     setGlobalIfUndef("gridEngineOutputOption",               "-o");
-    setGlobalIfUndef("gridEngineThreadsOption",              "-R span[hosts=1] -n THREADS");
-    setGlobalIfUndef("gridEngineMemoryOption",               "-M MEMORY");
-    setGlobalIfUndef("gridEnginePropagateCommand",           "bmodify -w \"done\(\"WAIT_TAG\"\)\"");
+    setGlobalIfUndef("gridEngineResourceOption",             "-R span[hosts=1] -n THREADS -M MEMORY");
     setGlobalIfUndef("gridEngineNameToJobIDCommand",         "bjobs -A -J \"WAIT_TAG\" | grep -v JOBID");
     setGlobalIfUndef("gridEngineNameToJobIDCommandNoArray",  "bjobs -J \"WAIT_TAG\" | grep -v JOBID");
     setGlobalIfUndef("gridEngineTaskID",                     "LSB_JOBINDEX");
@@ -97,11 +100,6 @@ sub configureLSF () {
 
     close(F);
 
-    if (!defined($memUnits)) {
-        print STDERR "-- Warning: unknown memory units for grid engine LSF assuming KB\n";
-        $memUnits = "k";
-    }
-
     #  Build a list of the resources available in the grid.  This will contain a list with keys
     #  of "#CPUs-#GBs" and values of the number of nodes With such a config.  Later on, we'll use this
     #  to figure out what specific settings to use for each algorithm.
@@ -131,6 +129,7 @@ sub configureLSF () {
 
         my $cpus  = $v[$cpuIdx];
         my $mem   = $v[$memIdx];
+        next if ($mem =~ m/-/);
 
         # if we failed to find the units from the configuration, inherit it from the lshosts output
         if (!defined($memUnits)) {

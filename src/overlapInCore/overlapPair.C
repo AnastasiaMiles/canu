@@ -32,19 +32,18 @@
  */
 
 #include "AS_global.H"
+#include "system.H"
 
 #include <pthread.h>
 
-#include "gkStore.H"
+#include "sqStore.H"
 #include "ovStore.H"
 
 #include "edlib.H"
 
 #include "overlapReadCache.H"
 
-#include "AS_UTL_reverseComplement.H"
-
-#include "timeAndSize.H" //  getTime();
+#include "sequence.H"
 
 //  The process will load BATCH_SIZE overlaps into memory, then load all the reads referenced by
 //  those overlaps.  Once all data is loaded, compute threads are spawned.  Each thread will reserve
@@ -186,7 +185,7 @@ public:
     partialOverlaps = false;
     invertOverlaps  = false;
 
-    gkpStore        = NULL;
+    seqStore        = NULL;
     overlapsLen     = 0;
     overlaps        = NULL;
     readSeq         = NULL;
@@ -202,7 +201,7 @@ public:
   bool                   invertOverlaps;
   char*                  readSeq;
 
-  gkStore               *gkpStore;
+  sqStore               *seqStore;
 
   uint32                 overlapsLen;       //  Not used.
   ovOverlap             *overlaps;
@@ -668,7 +667,7 @@ recomputeOverlaps(void *ptr) {
 
 int
 main(int argc, char **argv) {
-  char    *gkpName         = NULL;
+  char    *seqName         = NULL;
   char    *ovlName         = NULL;
   char    *outName         = NULL;
 
@@ -688,8 +687,8 @@ main(int argc, char **argv) {
   int err=0;
   int arg=1;
   while (arg < argc) {
-    if        (strcmp(argv[arg], "-G") == 0) {
-      gkpName = argv[++arg];
+    if        (strcmp(argv[arg], "-S") == 0) {
+      seqName = argv[++arg];
 
     } else if (strcmp(argv[arg], "-O") == 0) {
       ovlName = argv[++arg];
@@ -728,7 +727,7 @@ main(int argc, char **argv) {
     arg++;
   }
 
-  if (gkpName == NULL)
+  if (seqName == NULL)
     err++;
   if (ovlName == NULL)
     err++;
@@ -737,7 +736,7 @@ main(int argc, char **argv) {
 
   if (err) {
     fprintf(stderr, "usage: %s ...\n", argv[0]);
-    fprintf(stderr, "  -G gkpStore     Mandatory, path to gkpStore\n");
+    fprintf(stderr, "  -S seqStore     Mandatory, path to seqStore\n");
     fprintf(stderr, "\n");
     fprintf(stderr, "Inputs can come from either a store or a file.\n");
     fprintf(stderr, "  -O ovlStore     \n");
@@ -752,7 +751,7 @@ main(int argc, char **argv) {
     fprintf(stderr, "  -o ovlFile      \n");
     fprintf(stderr, "\n");
     fprintf(stderr, "  -erate e        Overlaps are computed at 'e' fraction error; must be larger than the original erate\n");
-    fprintf(stderr, "  -partial        Overlaps are 'overlapInCore -G' partial overlaps\n");
+    fprintf(stderr, "  -partial        Overlaps are 'overlapInCore -S' partial overlaps\n");
     fprintf(stderr, "  -memory m       Use up to 'm' GB of memory\n");
     fprintf(stderr, "\n");
     fprintf(stderr, "  -t n            Use up to 'n' cores\n");
@@ -764,31 +763,31 @@ main(int argc, char **argv) {
     exit(1);
   }
 
-  gkStore          *gkpStore = gkStore::gkStore_open(gkpName);
+  sqStore          *seqStore = sqStore::sqStore_open(seqName);
 
   ovStore          *ovlStore = NULL;
   ovStoreWriter    *outStore = NULL;
   ovFile           *ovlFile  = NULL;
   ovFile           *outFile  = NULL;
 
-  if (AS_UTL_fileExists(ovlName, true)) {
+  if (directoryExists(ovlName)) {
     fprintf(stderr, "Reading overlaps from store '%s' and writing to '%s'\n",
             ovlName, outName);
-    ovlStore = new ovStore(ovlName, gkpStore);
-    outStore = new ovStoreWriter(outName, gkpStore);
+    ovlStore = new ovStore(ovlName, seqStore);
+    outStore = new ovStoreWriter(outName, seqStore);
 
     if (bgnID < 1)
       bgnID = 1;
-    if (endID > gkpStore->gkStore_getNumReads())
-      endID = gkpStore->gkStore_getNumReads();
+    if (endID > seqStore->sqStore_getNumReads())
+      endID = seqStore->sqStore_getNumReads();
 
     ovlStore->setRange(bgnID, endID);
 
   } else {
     fprintf(stderr, "Reading overlaps from file '%s' and writing to '%s'\n",
             ovlName, outName);
-    ovlFile = new ovFile(gkpStore, ovlName, ovFileFull);
-    outFile = new ovFile(gkpStore, outName, ovFileFullWrite);
+    ovlFile = new ovFile(seqStore, ovlName, ovFileFull);
+    outFile = new ovFile(seqStore, outName, ovFileFullWrite);
   }
 
   workSpace        *WA  = new workSpace [numThreads];
@@ -809,7 +808,7 @@ main(int argc, char **argv) {
     WA[tt].partialOverlaps  = partialOverlaps;
     WA[tt].invertOverlaps   = invertOverlaps;
 
-    WA[tt].gkpStore         = gkpStore;
+    WA[tt].seqStore         = seqStore;
     WA[tt].overlaps         = NULL;
 
     // preallocate some work thread memory for common tasks to avoid allocation
@@ -833,15 +832,15 @@ main(int argc, char **argv) {
 
   uint32       overlapsALen = 0;
   uint32       overlapsBLen = 0;
-  ovOverlap  *overlapsA    = ovOverlap::allocateOverlaps(gkpStore, overlapsMax);
-  ovOverlap  *overlapsB    = ovOverlap::allocateOverlaps(gkpStore, overlapsMax);
+  ovOverlap  *overlapsA    = ovOverlap::allocateOverlaps(seqStore, overlapsMax);
+  ovOverlap  *overlapsB    = ovOverlap::allocateOverlaps(seqStore, overlapsMax);
 
   //  Set the globals
 
   uint32      *overlapsLen  = &overlapsALen;
   ovOverlap  *overlaps      =  overlapsA;
 
-  rcache = new overlapReadCache(gkpStore, memLimit);
+  rcache = new overlapReadCache(seqStore, memLimit);
 
   //  Load the first batch of overlaps and reads.  Purposely loading only 1/8th the normal batch size, to
   //  get computes computing while the next full batch is loaded.
@@ -849,7 +848,7 @@ main(int argc, char **argv) {
   overlapsMax /= 8;
 
   if (ovlStore)
-    *overlapsLen = ovlStore->readOverlaps(overlaps, overlapsMax, false);
+    *overlapsLen = ovlStore->loadBlockOfOverlaps(overlaps, overlapsMax);
   if (ovlFile)
     *overlapsLen = ovlFile->readOverlaps(overlaps, overlapsMax);
 
@@ -909,7 +908,7 @@ main(int argc, char **argv) {
     //  Load more overlaps
 
     if (ovlStore)
-      *overlapsLen = ovlStore->readOverlaps(overlaps, overlapsMax, false);
+      *overlapsLen = ovlStore->loadBlockOfOverlaps(overlaps, overlapsMax);
     if (ovlFile)
       *overlapsLen = ovlFile->readOverlaps(overlaps, overlapsMax);
 
@@ -941,7 +940,7 @@ main(int argc, char **argv) {
 
   delete    rcache;
 
-  gkpStore->gkStore_close();
+  seqStore->sqStore_close();
 
   delete    ovlStore;
   delete    outStore;

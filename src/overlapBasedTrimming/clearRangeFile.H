@@ -32,36 +32,42 @@
 
 #include "AS_global.H"
 
-#include "gkStore.H"
+#include "sqStore.H"
 
-#include "AS_UTL_fileIO.H"
+#include "files.H"
+
+//  Create a clear range file.  If the file doesn't exist, maxID must be
+//  set to the number of reads allowed.  If the file does exist, we don't
+//  care and load the number of reads from the file.
+//
+//  If no input file, set up for a new clear range:
+//    it's modified (so it'll get written out)
+//    every range is (first cleared) then set to the whole read
+//
+//  But if there is a file, load the clear ranges saved.
+
 
 class clearRangeFile {
 public:
+  clearRangeFile(char *fileName, sqStore *seq) {
 
-  //  Create a clear range file.  If the file doesn't exist, maxID must be set to the number
-  //  of reads allowed.  If the file does exist, we don't care and load the number of reads
-  //  from the file.
+    _modified = false;
 
-  clearRangeFile(char *fileName, gkStore *gkp) {
+    memset(_fileName, 0, sizeof(char) * (FILENAME_MAX+1));
+    strncpy(_fileName, fileName, FILENAME_MAX);
 
-    strncpy(_fileName, fileName, FILENAME_MAX-1);
+    _lastID   = seq->sqStore_getNumReads();
+    _bgn      = new uint32 [_lastID + 1];
+    _end      = new uint32 [_lastID + 1];
 
-    if (AS_UTL_fileExists(_fileName) == false) {
-      _modified = true;   //  Always gets written, regardless of changes
+    memset(_bgn, 0, sizeof(uint32) * (_lastID + 1));
+    memset(_end, 0, sizeof(uint32) * (_lastID + 1));
 
-      _lastID   = gkp->gkStore_getNumReads();
-      _bgn      = new uint32 [_lastID + 1];
-      _end      = new uint32 [_lastID + 1];
 
-      //  Every range is undefined
+    if (fileExists(_fileName) == false) {
+      _modified = true;
 
-      memset(_bgn, 0, sizeof(uint32) * (_lastID + 1));
-      memset(_end, 0, sizeof(uint32) * (_lastID + 1));
-
-      //  Nope, every range is set to fully clear.
-
-      reset(gkp);
+     reset(seq);
     }
 
     else {
@@ -69,31 +75,24 @@ public:
 
       FILE  *F = AS_UTL_openInputFile(_fileName);
 
-      AS_UTL_safeRead(F, &_lastID, "clearRangeFile::lastID", sizeof(uint32), 1);
-
-      assert(gkp->gkStore_getNumReads() == _lastID);  //  Sane?
-
-      _bgn = new uint32 [_lastID + 1];
-      _end = new uint32 [_lastID + 1];
-
-      AS_UTL_safeRead(F,  _bgn, "clearRangeFile::bgn", sizeof(uint32), _lastID + 1);
-      AS_UTL_safeRead(F,  _end, "clearRangeFile::end", sizeof(uint32), _lastID + 1);
+      loadFromFile(_lastID, "clearRangeFile::lastID",             F);
+      loadFromFile(_bgn,    "clearRangeFile::bgn",   _lastID + 1, F);
+      loadFromFile(_end,    "clearRangeFile::end",   _lastID + 1, F);
 
       AS_UTL_closeFile(F, _fileName);
+
+      assert(seq->sqStore_getNumReads() == _lastID);  //  Sane?  And if wrong, we've overwritten _bgn and _end, and crash anyway.
     }
   };
 
-
-  //  Close the clear range file.
 
   ~clearRangeFile() {
     if (_modified == true) {
       FILE  *F = AS_UTL_openOutputFile(_fileName);
 
-      AS_UTL_safeWrite(F, &_lastID, "clearRangeFile::lastID", sizeof(uint32), 1);
-
-      AS_UTL_safeWrite(F,  _bgn, "clearRangeFile::bgn", sizeof(uint32), _lastID + 1);
-      AS_UTL_safeWrite(F,  _end, "clearRangeFile::end", sizeof(uint32), _lastID + 1);
+      writeToFile(_lastID, "clearRangeFile::lastID",             F);
+      writeToFile(_bgn,    "clearRangeFile::bgn",   _lastID + 1, F);
+      writeToFile(_end,    "clearRangeFile::end",   _lastID + 1, F);
 
       AS_UTL_closeFile(F, _fileName);
     }
@@ -103,10 +102,10 @@ public:
   };
 
 
-  void      reset(gkStore *gkp) {
+  void      reset(sqStore *seq) {
     for (uint32 fi=1; fi <= _lastID; fi++) {
       _bgn[fi] = 0;
-      _end[fi] = gkp->gkStore_getRead(fi)->gkRead_sequenceLength();
+      _end[fi] = seq->sqStore_getRead(fi)->sqRead_sequenceLength();
     }
   };
 
@@ -147,7 +146,7 @@ public:
 private:
   bool     _modified;
 
-  char     _fileName[FILENAME_MAX];
+  char     _fileName[FILENAME_MAX+1];
 
   uint32   _lastID;  //  [_lastID] is valid; allocated _lastID+1 spots.
   uint32  *_bgn;

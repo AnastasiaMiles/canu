@@ -41,8 +41,8 @@
 #include <math.h>
 
 #include "AS_global.H"
-#include "AS_UTL_fileIO.H"
-#include "AS_UTL_reverseComplement.H"
+#include "files.H"
+#include "sequence.H"
 
 #include <vector>
 #include <algorithm>

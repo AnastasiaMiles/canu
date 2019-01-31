@@ -15,11 +15,20 @@
  *
  *  This file is derived from:
  *
+ *    src/AS_BAT/AS_BAT_Unitig_AddFrag.C
  *    src/bogart/AS_BAT_Unitig_AddFrag.C
  *
  *  Modifications by:
  *
- *    Brian P. Walenz beginning on 2016-AUG-12
+ *    Brian P. Walenz from 2010-NOV-23 to 2013-AUG-01
+ *      are Copyright 2010,2012-2013 J. Craig Venter Institute, and
+ *      are subject to the GNU General Public License version 2
+ *
+ *    Brian P. Walenz on 2014-DEC-19
+ *      are Copyright 2014 Battelle National Biodefense Institute, and
+ *      are subject to the BSD 3-Clause License
+ *
+ *    Brian P. Walenz beginning on 2016-JAN-11
  *      are a 'United States Government Work', and
  *      are released in the public domain
  *
@@ -48,7 +57,7 @@ Unitig::addRead(ufNode node, int offset, bool report) {
   _vector->registerRead(node.ident, _id, ufpath.size());
 
   // keep track of max position in unitig
-  int32 frgEnd = MAX(node.position.bgn, node.position.end);
+  int32 frgEnd = max(node.position.bgn, node.position.end);
   if (frgEnd > _length)
     _length = frgEnd;
 
@@ -88,10 +97,10 @@ Unitig::bubbleSortLastRead(void) {
   uint32   lastid  = ufpath.size() - 1;
 
   ufNode   last    = ufpath[lastid];
-  uint32   lastbgn = MIN(last.position.bgn, last.position.end);
+  uint32   lastbgn = min(last.position.bgn, last.position.end);
 
   while ((lastid > 0) &&
-         (lastbgn < MIN(ufpath[previd].position.bgn, ufpath[previd].position.end))) {
+         (lastbgn < min(ufpath[previd].position.bgn, ufpath[previd].position.end))) {
     ufpath[lastid] = ufpath[previd];
 
     _ufpathIdx[ufpath[lastid].ident] = lastid;

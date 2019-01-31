@@ -26,38 +26,45 @@ TARGET       := libcanu.a
 
 SOURCES      := AS_global.C \
                 \
-                AS_UTL/AS_UTL_decodeRange.C \
-                AS_UTL/AS_UTL_fasta.C \
-                AS_UTL/AS_UTL_fileIO.C \
-                AS_UTL/AS_UTL_reverseComplement.C \
-                AS_UTL/AS_UTL_stackTrace.C \
+                utility/files.C \
+                utility/files-buffered.C \
+                utility/files-compressed.C \
+                utility/files-memoryMapped.C \
                 \
-                AS_UTL/AS_UTL_alloc.C \
+                utility/strings.C \
                 \
-                AS_UTL/bitEncodings.C \
-                AS_UTL/bitPackedFile.C \
-                AS_UTL/bitPackedArray.C \
-                AS_UTL/dnaAlphabets.C \
-                AS_UTL/hexDump.C \
-                AS_UTL/md5.C \
-                AS_UTL/memoryMappedFile.C \
-                AS_UTL/mt19937ar.C \
-                AS_UTL/readBuffer.C \
-                AS_UTL/speedCounter.C \
-                AS_UTL/sweatShop.C \
-                AS_UTL/timeAndSize.C \
-                AS_UTL/kMer.C \
+                utility/system.C \
+                utility/system-stackTrace.C \
                 \
-                falcon_sense/libfalcon/falcon.C \
+                utility/sequence.C \
+                \
+                utility/kmers.C \
+                utility/kmers-reader.C \
+                utility/kmers-writer.C \
+                utility/kmers-writer-block.C \
+                utility/kmers-writer-stream.C \
+                utility/kmers-statistics.C \
+                utility/kmers-exact.C \
+                \
+                utility/bits.C \
+                \
+                utility/hexDump.C \
+                utility/md5.C \
+                utility/mt19937ar.C \
+                utility/objectStore.C \
+                utility/speedCounter.C \
+                utility/sweatShop.C \
+                \
                 correction/computeGlobalScore.C \
                 correction/falconConsensus.C \
                 correction/falconConsensus-alignTag.C \
                 \
-                stores/gkLibrary.C \
-                stores/gkStore.C \
-                stores/gkStoreConstructor.C \
-                stores/gkStoreEncode.C \
-                stores/gkStorePartition.C \
+                stores/sqLibrary.C \
+                stores/sqStore.C \
+                stores/sqStoreConstructor.C \
+                stores/sqStoreInfo.C \
+                stores/sqStoreEncode.C \
+                stores/sqStorePartition.C \
                 \
                 stores/ovOverlap.C \
                 stores/ovStore.C \
@@ -74,9 +81,6 @@ SOURCES      := AS_global.C \
                 stores/libsnappy/snappy-sinksource.cc \
                 stores/libsnappy/snappy-stubs-internal.cc \
                 stores/libsnappy/snappy.cc \
-                \
-                meryl/libmeryl.C \
-                meryl/libsequence.C \
                 \
                 overlapInCore/overlapReadCache.C \
                 \
@@ -101,56 +105,32 @@ SOURCES      := AS_global.C \
                 utgcns/libNDalign/NDalgorithm-forward.C \
                 utgcns/libNDalign/NDalgorithm-reverse.C \
                 \
-                utgcns/libcns/abAbacus-addRead.C \
-                utgcns/libcns/abAbacus-appendBases.C \
-                utgcns/libcns/abAbacus-applyAlignment.C \
-                utgcns/libcns/abAbacus-baseCall.C \
-                utgcns/libcns/abAbacus-mergeRefine.C \
-                utgcns/libcns/abAbacus-refine.C \
-                utgcns/libcns/abAbacus-refreshMultiAlign.C \
-                utgcns/libcns/abAbacus.C \
-                utgcns/libcns/abColumn.C \
-                utgcns/libcns/abMultiAlign.C \
-                utgcns/libcns/unitigConsensus.C \
                 utgcns/libpbutgcns/AlnGraphBoost.C  \
                 \
                 gfa/gfa.C \
-                gfa/bed.C \
-                \
-                meryl/libkmer/existDB-create-from-fasta.C \
-                meryl/libkmer/existDB-create-from-meryl.C \
-                meryl/libkmer/existDB-create-from-sequence.C \
-                meryl/libkmer/existDB-state.C \
-                meryl/libkmer/existDB.C \
-                meryl/libkmer/positionDB-access.C \
-                meryl/libkmer/positionDB-dump.C \
-                meryl/libkmer/positionDB-file.C \
-                meryl/libkmer/positionDB-mismatch.C \
-                meryl/libkmer/positionDB-sort.C \
-                meryl/libkmer/positionDB.C
-
+                gfa/bed.C
 
 
 ifeq (${BUILDSTACKTRACE}, 1)
-SOURCES      += AS_UTL/libbacktrace/atomic.c \
-                AS_UTL/libbacktrace/backtrace.c \
-                AS_UTL/libbacktrace/dwarf.c \
-                AS_UTL/libbacktrace/elf.c \
-                AS_UTL/libbacktrace/fileline.c \
-                AS_UTL/libbacktrace/mmap.c \
-                AS_UTL/libbacktrace/mmapio.c \
-                AS_UTL/libbacktrace/posix.c \
-                AS_UTL/libbacktrace/print.c \
-                AS_UTL/libbacktrace/simple.c \
-                AS_UTL/libbacktrace/sort.c \
-                AS_UTL/libbacktrace/state.c \
-                AS_UTL/libbacktrace/unknown.c
+SOURCES      += utility/libbacktrace/atomic.c \
+                utility/libbacktrace/backtrace.c \
+                utility/libbacktrace/dwarf.c \
+                utility/libbacktrace/elf.c \
+                utility/libbacktrace/fileline.c \
+                utility/libbacktrace/mmap.c \
+                utility/libbacktrace/mmapio.c \
+                utility/libbacktrace/posix.c \
+                utility/libbacktrace/print.c \
+                utility/libbacktrace/simple.c \
+                utility/libbacktrace/sort.c \
+                utility/libbacktrace/state.c \
+                utility/libbacktrace/unknown.c
 endif
 
 
 
 SRC_INCDIRS  := . \
-                AS_UTL \
+                utility \
                 stores \
                 stores/libsnappy \
                 alignment \
@@ -159,23 +139,22 @@ SRC_INCDIRS  := . \
                 utgcns/libpbutgcns \
                 utgcns/libNDFalcon \
                 utgcns/libboost \
-                meryl/libleaff \
                 overlapInCore \
                 overlapInCore/libedlib \
-                overlapInCore/liboverlap \
-                falcon_sense/libfalcon
+                overlapInCore/liboverlap
 
 SUBMAKEFILES := stores/dumpBlob.mk \
-                stores/gatekeeperCreate.mk \
-                stores/gatekeeperDumpFASTQ.mk \
-                stores/gatekeeperDumpMetaData.mk \
-                stores/gatekeeperPartition.mk \
                 stores/ovStoreBuild.mk \
+                stores/ovStoreConfig.mk \
                 stores/ovStoreBucketizer.mk \
                 stores/ovStoreSorter.mk \
                 stores/ovStoreIndexer.mk \
                 stores/ovStoreDump.mk \
                 stores/ovStoreStats.mk \
+                stores/sqStoreCreate.mk \
+                stores/sqStoreCreatePartition.mk \
+                stores/sqStoreDumpFASTQ.mk \
+                stores/sqStoreDumpMetaData.mk \
                 stores/tgStoreCompress.mk \
                 stores/tgStoreDump.mk \
                 stores/tgStoreLoad.mk \
@@ -184,19 +163,13 @@ SUBMAKEFILES := stores/dumpBlob.mk \
                 stores/tgTigDisplay.mk \
                 stores/loadCorrectedReads.mk \
                 stores/loadTrimmedReads.mk \
+                stores/loadErates.mk \
                 \
-                meryl/libleaff.mk \
-                meryl/leaff.mk \
                 meryl/meryl.mk \
-                meryl/sequence.mk \
-                meryl/maskMers.mk \
-                meryl/simple.mk \
-                meryl/estimate-mer-threshold.mk \
-                meryl/existDB.mk \
-                meryl/positionDB.mk \
-                meryl/simple-dump.mk \
+                meryl/meryl-import.mk \
+                meryl/meryl-lookup.mk \
                 \
-                merTrim/merTrim.mk \
+                sequence/sequence.mk \
                 \
                 overlapInCore/overlapInCore.mk \
                 overlapInCore/overlapInCorePartition.mk \
@@ -211,6 +184,8 @@ SUBMAKEFILES := stores/dumpBlob.mk \
                 \
                 minimap/mmapConvert.mk \
                 \
+                wtdbg/wtdbgConvert.mk \
+                \
                 correction/filterCorrectionOverlaps.mk \
                 correction/generateCorrectionLayouts.mk \
                 correction/filterCorrectionLayouts.mk \
@@ -220,9 +195,6 @@ SUBMAKEFILES := stores/dumpBlob.mk \
                 correction/errorEstimate.mk \
                 \
                 haplotyping/splitHaplotype.mk \
-                \
-                falcon_sense/createFalconSenseInputs.mk \
-                falcon_sense/falcon_sense.mk \
                 \
                 overlapBasedTrimming/trimReads.mk \
                 overlapBasedTrimming/splitReads.mk \
@@ -235,8 +207,6 @@ SUBMAKEFILES := stores/dumpBlob.mk \
                 \
                 bogus/bogus.mk \
                 \
-                erateEstimate/erateEstimate.mk \
-                \
                 utgcns/utgcns.mk \
                 \
                 gfa/alignGFA.mk \
@@ -245,3 +215,9 @@ SUBMAKEFILES := stores/dumpBlob.mk \
                 fastq-utilities/fastqSample.mk \
                 fastq-utilities/fastqSimulate.mk \
                 fastq-utilities/fastqSimulate-sort.mk
+
+ifeq ($(BUILDTESTS), 1)
+SUBMAKEFILES += utility/bitsTest.mk \
+                utility/filesTest.mk \
+                utility/stddevTest.mk
+endif

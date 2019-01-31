@@ -54,7 +54,7 @@ correctedErrorRate <float=unset>
   <correctedErrorRate>` slightly, by 1% or so.
 
   For high-coverage datasets (more than 60X), we recommend decreasing :ref:`correctedErrorRate
-  <correctedErrorRate>` slighly, by 1% or so.
+  <correctedErrorRate>` slightly, by 1% or so.
 
   Raising the :ref:`correctedErrorRate <correctedErrorRate>` will increase run time.  Likewise,
   decreasing :ref:`correctedErrorRate <correctedErrorRate>` will decrease run time, at the risk of
@@ -68,8 +68,10 @@ minReadLength <integer=1000>
 
   Must be no smaller than minOverlapLength.
 
-  If set high enough, the gatekeeper module will halt as too many of the input reads have been
-  discarded.  Set :ref:`stopOnReadQuality <stopOnReadQuality>` to false to avoid this.
+  If set high enough, the gatekeeper module will claim there are errors in the input reads,
+  as too many of the input reads have been discarded.  As long as there is sufficient coverage,
+  this is not a problem.  See :ref:`stopOnReadQuality <stopOnReadQuality>` and 
+  :ref:`stopOnLowCoverage <stopOnLowCoverage>`
 
 .. _minOverlapLength:
 
@@ -80,6 +82,20 @@ minOverlapLength <integer=500>
 
   Must be no bigger than minReadLength.
 
+.. _readSamplingCoverage:
+
+readSamplingCoverage <integer=unset>
+  After loading all reads into the sequence store, flag some reads as 'not to be used' until this
+  amount of coverage remains.  Reads are flagged according to the score described in
+  :ref:`readSamplingBias <readSamplingBias>`.
+
+.. _readSamplingBias:
+
+readSamplingBias <float=0.0>
+  Adjust the sampling bias towards shorter (negative numbers) or longer (positive numbers) reads.
+  Reads are assigned a score of `random * length ^ bias` and the lowest scoring reads are flagged as
+  described in :ref:`readSamplingCoverage <readSamplingCoverage>`.
+
 .. _genomeSize:
 
 genomeSize <float=unset> *required*
@@ -88,6 +104,13 @@ genomeSize <float=unset> *required*
   The genome size estimate is used to decide how many reads to correct (via the :ref:`corOutCoverage <corOutCoverage>`
   parameter) and how sensitive the mhap overlapper should be (via the :ref:`mhapSensitivity <mhapSensitivity>`
   parameter). It also impacts some logging, in particular, reports of NG50 sizes.
+
+.. _fast:
+
+fast <toggle>
+   This option uses MHAP overlapping for all steps, not just correction, making assembly significantly faster. It can be used on any genome size but may produce less continuous assemblies on genomes larger than 1 Gbp. It is recommended for nanopore genomes smaller than 1 Gbp or metagenomes.
+   
+   The fast option will also optionally use `wtdbg <https://github.com/ruanjue/wtdbg2>`_ for unitigging if wtdbg is manually copied to the Canu binary folder. However, this is only tested with very small genomes and is **NOT** recommended.
 
 .. _canuIteration:
 
@@ -124,28 +147,98 @@ onFailure <string=unset>
 Process Control
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
+.. _showNext:
+
 showNext <boolean=false>
   Report the first major command that would be run, but don't run it.  Processing to get to that
-  command, for example, checking the output of the previous command or preparing inputs for the
-  next command, is still performed.
+  command, for example, checking the output of the previous command or preparing inputs for the next
+  command, is still performed.
+
+.. _stopOnReadQuality:
+
+stopOnReadQuality <string=false>
+  If set, Canu will stop with the following error if there are significantly fewer reads or bases
+  loaded into the read store than what is in the input data.
+
+  ::
+
+   Gatekeeper detected potential problems in your input reads.
+
+   Please review the logging in files:
+     /assembly/godzilla/asm.gkpStore.BUILDING.err
+     /assembly/godzilla/asm.gkpStore.BUILDING/errorLog
+
+   If you wish to proceed, rename the store with the following command and restart canu.
+
+     mv /assembly/godzilla/asm.gkpStore.BUILDING \
+        /assembly/godzilla/asm.gkpStore.ACCEPTED
+
+   Option stopOnReadQuality=false skips these checks.
+
+  The missing reads could be too short (decrease :ref:`minReadLength <minReadLength>` to include
+  them), or have invalid bases or quality values.  A summary of the files loaded and errors detected
+  is in the ``asm.gkpStore.BUILDING.err`` file, with full gory details in the
+  ``asm.gkpStore.BUILDING/errorLog``.
+
+  To proceed, set ``stopOnReadQuality=false`` or rename the directory as shown.
+
+  Note that `U` bases are silently translated to `T` bases, to allow assembly of RNA sequences.
+
+.. _stopOnLowCoverage:
+
+stopOnLowCoverage <integer=10>
+  Stop the assembly if read coverage is too low to be useful.  Coverage is
+  checked whene when input sequences are
+  initially loaded into the sequence store, when corrected reads are generated,
+  and when read ends are trimmed off.
+
+
+.. _stopAfter:
 
 stopAfter <string=undefined>
-  If set, Canu will stop processing after a specific stage in the pipeline finishes.
+  If set, Canu will stop processing after a specific stage in the pipeline finishes.  Valid values are:
 
-  Valid values for ``stopAfter`` are:
+  +-----------------------+-------------------------------------------------------------------+
+  | **stopAfter=**        | **Canu will stop after ....**                                     |
+  +-----------------------+-------------------------------------------------------------------+
+  | sequenceStore         | reads are loaded into the assembler read database.                |
+  +-----------------------+-------------------------------------------------------------------+
+  | meryl-configure       | kmer counting jobs are configured.                                |
+  +-----------------------+-------------------------------------------------------------------+
+  | meryl-count           | kmers are counted, but not processed into one database.           |
+  +-----------------------+-------------------------------------------------------------------+
+  | meryl-merge           | kmers are merged into one database.                               |
+  +-----------------------+-------------------------------------------------------------------+
+  | meryl-process         | frequent kmers are generated.                                     |
+  +-----------------------+-------------------------------------------------------------------+
+  | meryl-subtract        | haplotype specific kmers are generated.                           |
+  +-----------------------+-------------------------------------------------------------------+
+  | meryl                 | all kmer work is complete.                                        |
+  +-----------------------+-------------------------------------------------------------------+
+  | haplotype-configure   | haplotype read separation jobs are configured.                    |
+  +-----------------------+-------------------------------------------------------------------+
+  | haplotype             | haplotype-specific reads are generated.                           |
+  +-----------------------+-------------------------------------------------------------------+
+  | overlapConfigure      | overlap jobs are configured.                                      |
+  +-----------------------+-------------------------------------------------------------------+
+  | overlap               | overlaps are generated, before they are loaded into the database. |
+  +-----------------------+-------------------------------------------------------------------+
+  | overlapStoreConfigure | the jobs for creating the overlap database are configured.        |
+  +-----------------------+-------------------------------------------------------------------+
+  | overlapStore          | overlaps are loaded into the overlap database.                    |
+  +-----------------------+-------------------------------------------------------------------+
+  | correction            | corrected reads are generated.                                    |
+  +-----------------------+-------------------------------------------------------------------+
+  | trimming              | trimmed reads are generated.                                      |
+  +-----------------------+-------------------------------------------------------------------+
+  | unitig                | unitigs and contigs are created.                                  |
+  +-----------------------+-------------------------------------------------------------------+
+  | consensusConfigure    | consensus jobs are configured.                                    |
+  +-----------------------+-------------------------------------------------------------------+
+  | consensus             | consensus sequences are loaded into the databases.                |
+  +-----------------------+-------------------------------------------------------------------+
 
-   - ``gatekeeper`` - stops after the reads are loaded into the assembler read database.
-   - ``meryl`` - stops after frequent kmers are tabulated.
-   - ``overlapConfigure`` - stops after overlap jobs are configured.
-   - ``overlap`` - stops after overlaps are generated, before they are loaded into the overlap database.
-   - ``overlapStoreConfigure`` - stops after the ``ovsMethod=parallel`` jobs are configured; has no impact for ``ovsMethod=sequential``.
-   - ``overlapStore`` - stops after overlaps are loaded into the overlap database.
-   - ``readCorrection`` - stops after corrected reads are generated.
-   - ``readTrimming`` - stops after trimmed reads are generated.
-   - ``unitig`` - stops after unitigs and contigs are created.
-   - ``consensusConfigure`` - stops after consensus jobs are configured.
-   - ``consensus`` - stops after consensus sequences are loaded into the databases.
-
+  *readCorrection* and *readTrimming* are deprecated synonyms for *correction* and *trimming*, respectively.
 
 General Options
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -157,16 +250,18 @@ shell <string="/bin/sh">
 java <string="java">
   A path to a Java application launcher of at least version 1.8.
 
+minimap <string="minimap2">
+  A path to the minimap2 versatile pairwise aligner.
+
 gnuplot <string="gnuplot">
-  A path to the gnuplot graphing utility.
+  A path to the gnuplot graphing utility.  Plotting is disabled if this is unset
+  (`gnuplot=` or `gnuplot=undef`), or if gnuplot fails to execute, or if gnuplot
+  cannot generate plots.  The latter two conditions generate warnings in the
+  diagnostic output of Canu.
 
 gnuplotImageFormat <string="png">
-  The type of image to generate in gnuplot.  By default, canu will use png, svg or gif, in that order.
-
-gnuplotTested <boolean=false>
-  If set, skip the tests to determine if gnuplot will run, and to decide the image type to generate.
-  This is used when gnuplot fails to run, or isn't even installed, and allows canu to continue
-  execution without generating graphs.
+  The type of image to generate in gnuplot.  By default, canu will use png,
+  svg or gif, in that order.
 
 preExec <string=undef>
   A single command that will be run before Canu starts in a grid-enabled configuration.
@@ -205,13 +300,22 @@ Cleanup Options
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 saveOverlaps <boolean=false>
-  If set, do not remove raw overlap output from either mhap or overlapInCore.  Normally, this output
-  is removed once the overlaps are loaded into an overlap store.
+  If set to 'false', the raw overlapper outputs are removed as soon as they are loaded into an
+  overlap store.  Also, the correction and trimming overlap stores are removed when they are no
+  longer needed..  This is recommended in nearly every case.
+
+  If set to 'stores', the raw overlapper outputs are removed, but all of the overlap stores are
+  retained.  The overlap stores capture all the critical information in the raw outputs and the raw
+  outputs are redundant and unwieldy.  Retaining the overlap stores can allow one to 'back up' and
+  redo a step, but this is generally not useful unless one is familiar with the algorithms.
+
+  If set to 'true', all overlapper outputs and all stores are retained.  This is useful for
+  debugging potential problems with the overlap store.
 
 saveReadCorrections <boolean=false>.
   If set, do not remove raw corrected read output from correction/2-correction. Normally, this
   output is removed once the corrected reads are generated.
-  
+
 saveIntermediates <boolean=false>
   If set, do not remove intermediate outputs.  Normally, intermediate files are removed
   once they are no longer needed.
@@ -224,6 +328,33 @@ saveMerCounts <boolean=false>
 saveReads <boolean=false>
   If set, save the corrected reads (in asm.correctedReads.fasta.gz) and trimmed reads (in asm.trimmedReads.fasta.gz).
   Both read sets are saved in the asm.gkpStore, and can be retrieved later.
+
+Executive Configuration
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+The Canu 'executive' is responsible for controlling what tasks run and when they run.  It doesn't
+directly do any significant computations, rather it just examines the files that exist and decides
+which component to run next.  For example, if overlaps exist but contigs do not, it would create
+contigs next.
+
+When under grid control, some tasks can be run in the same job as the executive, if there is emough
+memory and threads reserved for the executive.  The benefit of this is slight; on a heavily loaded
+grid, it would reduce the number of job scheduling iterations Canu needs to run.
+
+.. _executiveMemory:
+
+executiveMemory <integer=4>
+
+  The amount of memory, in gigabytes, to reserve when running the Canu exectuve (and any jobs it
+  runs directly).  Increasing this past 4 GB can allow some tasks (such as creating an overlap store
+  or creating contigs) to run directly, without needing a separate grid job.
+
+.. _executiveThreads:
+
+executiveThreads <integer=1>
+
+  The number of threads to reserve for the Canu executive.
+
 
 Overlapper Configuration
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -242,7 +373,7 @@ on the option: 'cor' for read correction, 'obt' for read trimming ('overlap base
 read correction to the 'ovl' algorithm.
 
 {prefix}Overlapper <string=see-below>
-  Specify which overlap algorith, 'mhap' or 'ovl' or 'minimap'.  The default is to use 'mhap' for
+  Specify which overlap algorithm, 'mhap' or 'ovl' or 'minimap'.  The default is to use 'mhap' for
   'cor' and 'ovl' for both 'obt' and 'utg'.
 
 Overlapper Configuration, ovl Algorithm
@@ -271,7 +402,7 @@ Overlapper Configuration, ovl Algorithm
   Amount of sequence (bp to load into the overlap hash table.
 
 {prefix}OvlHashLoad <integer=unset>
-  Maximum hash table load.  If set too high, table lookups are inefficent; if too low, search
+  Maximum hash table load.  If set too high, table lookups are inefficient; if too low, search
   overhead dominates run time.
 
 {prefix}OvlMerDistinct <integer=unset>
@@ -296,7 +427,8 @@ Overlapper Configuration, mhap Algorithm
 ----------------------------------------
 
 {prefix}MhapBlockSize <integer=unset>
-  Number of reads per 1GB block.  Memory * size is loaded into memory per job.
+  For the MHAP overlapper, the number of reads to load per GB of memory (mhapMemory).
+  When mhapSensitivity=high, this value is automatically divided by two.
 
 {prefix}MhapMerSize <integer=unset>
   K-mer size for seeds in mhap.
@@ -314,7 +446,7 @@ Overlapper Configuration, mhap Algorithm
   genomeSize), 'low' sensitivity is used if coverage is more than 60; 'normal' is used if coverage
   is between 60 and 30, and 'high' is used for coverages less than 30.
 
-Overlapper Configuration, mhap Algorithm
+Overlapper Configuration, mmap Algorithm
 ----------------------------------------
 
 {prefix}MMapBlockSize <integer=unset>
@@ -326,29 +458,38 @@ Overlapper Configuration, mhap Algorithm
 Overlap Store
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-The overlap algorithms return overlaps in an arbitrary order.  The correction, trimming and assembly
-algorithms usually need to know all overlaps for a single read.  The overlap store duplicates each
-overlap, sorts them by the first ID, and stores them for quick retrieval of all overlaps for a
-single read.
+The overlap algorithms return overlaps in an arbitrary order, however, all other algorithms (or
+nearly all) require all overlaps for a single read to be readily available.  Thus, the overlap store
+collects and sorts the overlapper outputs into a store of overlaps, sorted by the first read in the
+overlap.  Each overlap is listed twice in the store, once in an "A vs B" format, and once in a "B vs
+A" format (that is, swapping which read is 'first' in the overlap description).
 
-The overlap store construction process involves reading outputs of the overlap algorithm (in *.ovb files),
-duplicating each overlap, and writing these to intermediate files.  Each intermediate file is loaded into
-memory, sorted, and written back to disk.
+Two construction algorithms are supported.  A 'sequential' method uses a single data stream, and is
+faster for small and moderate size assemblies.  A 'parallel' method uses multiple compute nodes and
+can be faster (depending on your network disk bandwidth) for moderate and large assemblies.  Be
+advised that the parallel method is less efficient than the sequential method, and can easily thrash
+consumer-level NAS devices resulting in exceptionally poor performance.
+
+The sequential method load all overlapper outputs (.ovb files in 1-overlapper) into memory,
+duplicating each overlap.  It then sortes overlaps, and creates the final overlap store.
+
+The parallel method uses two parallel tasks: bucketizing ('ovb' tasks) and sorting ('ovs' tasks).
+Bucketizing reads the outputs of the overlap tasks (ovb files in 1-overlapper), duplicates each
+overlap, and writes these to intermediate files.  Sorting tasks load these intermediate file into
+memory, sorts the overlaps, then writes the sorted overlaps back to disk.  There will be one
+'bucketizer' ('ovb' tasks) task per overlap task, and tens to hundreds of 'sorter' ('ovs' tasks).  A
+final 'indexing' step is done in the Canu executive, which ties all the various files togather into
+the final overlap store.
+
+Increasing ovsMemory will allow more overlaps to fit into memory at once.  This will allow larger
+assemblies to use the sequential method, or reduce the number of 'ovs' tasks for the parallel
+method.
+
+Increasing the allowed memory for the Canu executive can allow the overlap store to be constructed as
+part of the executive job -- a separate grid job for constructing the store is not needed.
 
 ovsMemory <float>
   How much memory, in gigabytes, to use for constructing overlap stores.  Must be at least 256m or 0.25g.
-
-ovsMethod <string="sequential">
-  Two construction algorithms are supported.  The 'sequential' method uses a single data stream, and
-  is faster for small and moderate size assemblies.  The 'parallel' method uses multiple compute
-  nodes and can be faster (depending on your network disk bandwitdh) for moderate and large
-  assemblies.
-
-  The parallel method is selected for genomes larger than 1 Gbp, but only when Canu runs in grid
-  mode.  A special 'forceparallel' method will force usage of the parallel method regardless of the
-  availability of a grid.  Be advised that the parallel method is less efficient than the sequential
-  method, and can easily thrash consumer-level NAS devices resulting in exceptionally poor
-  performance.
 
 Meryl
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -387,14 +528,14 @@ Grid Engine Support
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 Canu directly supports most common grid scheduling systems.  Under normal use, Canu will query the
-system for grid support, congigure itself for the machines available in the grid, then submit itself
+system for grid support, configure itself for the machines available in the grid, then submit itself
 to the grid for execution.  The Canu pipeline is a series of about a dozen steps that alternate
-between embarassingly parallel computations (e.g., overlap computation) and sequential bookkeeping
+between embarrassingly parallel computations (e.g., overlap computation) and sequential bookkeeping
 steps (e.g., checking if all overlap jobs finished).  This is entirely managed by Canu.
 
 Canu has first class support for the various schedulers derived from Sun Grid Engine (Univa, Son of
 Grid Engine) and the Simple Linux Utility for Resource Management (SLURM), meaning that the
-devlopers have direct access to these systems.  Platform Computing's Load Sharing Facility (LSF) and
+developers have direct access to these systems.  Platform Computing's Load Sharing Facility (LSF) and
 the various schedulers derived from the Portable Batch System (PBS, Torque and PBSPro) are supported
 as well, but without developer access bugs do creep in.  As of Canu v1.5, support seems stable and
 working.
@@ -435,32 +576,13 @@ commands, they all start with ``gridEngine``.  For each grid, these parameters a
 various ``src/pipeline/Grid_*.pm`` modules.  The parameters are used in
 ``src/pipeline/canu/Execution.pm``.
 
-For SGE grids, two options are sometimes necessary to tell canu about pecularities of your grid:
-``gridEngineThreadsOption`` describes how to request multiple cores, and ``gridEngineMemoryOption``
-describes how to request memory.  Usually, canu can figure out how to do this, but sometimes it
-reports an error such as::
-
- -- WARNING:  Couldn't determine the SGE parallel environment to run multi-threaded codes.
- --           Valid choices are (pick one and supply it to canu):
- --             gridEngineThreadsOption="-pe make THREADS"
- --             gridEngineThreadsOption="-pe make-dedicated THREADS"
- --             gridEngineThreadsOption="-pe mpich-rr THREADS"
- --             gridEngineThreadsOption="-pe openmpi-fill THREADS"
- --             gridEngineThreadsOption="-pe smp THREADS"
- --             gridEngineThreadsOption="-pe thread THREADS"
-
-or::
-
- -- WARNING:  Couldn't determine the SGE resource to request memory.
- --           Valid choices are (pick one and supply it to canu):
- --             gridEngineMemoryOption="-l h_vmem=MEMORY"
- --             gridEngineMemoryOption="-l mem_free=MEMORY"
-
-If you get such a message, just add the appropriate line to your canu command line.  Both options
-will replace the uppercase text (THREADS or MEMORY) with the value canu wants when the job is
-submitted.  For ``gridEngineMemoryOption``, any number of ``-l`` options can be supplied; we could
-use ``gridEngineMemoryOption="-l h_vmem=MEMORY -l mem_free=MEMORY"`` to request both ``h_vmem`` and
-``mem_free`` memory.
+In Canu 1.8 and earlier, ``gridEngineMemoryOption`` and ``gridEngineThreadsOption`` are used to tell
+Canu how to request resources from the grid.  Starting with ``snapshot v1.8 +90 changes`` (roughly
+January 11th), those options were merged into ``gridEngineResourceOption``.  These options specify
+the grid options needed to request memory and threads for each job.  For example, the default
+``gridEngineResourceOption`` for PBS/Torque is "-l nodes=1:ppn=THREADS:mem=MEMORY", and for Slurm it
+is "--cpus-per-task=THREADS --mem-per-cpu=MEMORY".  Canu will replace "THREADS" and "MEMORY" with
+the specific values needed for each job.
 
 .. _grid-options:
 
@@ -471,7 +593,7 @@ To run on the grid, each stage needs to be configured - to tell the grid how man
 Some support for this is automagic (for example, overlapInCore and mhap know how to do this), others need to be manually configured.
 Yes, it's a problem, and yes, we want to fix it.
 
-The gridOptions* parameters supply grid-specific opitons to the grid submission command.
+The gridOptions* parameters supply grid-specific options to the grid submission command.
 
 gridOptions <string=unset>
   Grid submission command options applied to all grid jobs
@@ -514,7 +636,7 @@ Algorithm Selection
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 Several algorithmic components of canu can be disabled, based on the type of the reads being
-assebmled, the type of processing desired, or the amount of comput resources available.  Overlap
+assembled, the type of processing desired, or the amount of compute resources available.  Overlap
 
 enableOEA <boolean=true>
   Do overlap error adjustment - comprises two steps: read error detection (RED and overlap error adjustment (OEA
@@ -599,7 +721,7 @@ correction.
 .. _maxThreads:
 
 The 'minMemory', 'maxMemory', 'minThreads' and 'maxThreads' options will apply to all jobs, and
-can be used to artifically limit canu to a portion of the current machine.  In the overlapper
+can be used to artificially limit canu to a portion of the current machine.  In the overlapper
 example above, setting maxThreads=4 would result in two concurrent jobs instead of four.
 
 
@@ -646,15 +768,15 @@ cnsPartitions
   Compute conseus by splitting the tigs into N partitions.
 
 cnsPartitionMin
-  Don't make a paritition with fewer than N reads
+  Don't make a partition with fewer than N reads
 
 cnsMaxCoverage
   Limit unitig consensus to at most this coverage.
- 
+
 .. _cnsErrorRate:
 
 cnsErrorRate
-  Inform the consensus genration algorithm of the amount of difference it should expect in a
+  Inform the consensus generation algorithm of the amount of difference it should expect in a
   read-to-read alignment.  Typically set to :ref:`utgOvlErrorRate <utgOvlErrorRate>`.  If set too
   high, reads could be placed in an incorrect location, leading to errors in the consensus sequence.
   If set too low, reads could be omitted from the consensus graph (or multialignment, depending on
@@ -715,7 +837,7 @@ Output Filtering
 .. _contigFilter:
 
 contigFilter <minReads, integer=2> <minLength, integer=0> <singleReadSpan, float=1.0> <lowCovSpan, float=0.5> <lowCovDepth, integer=5>
-  A contig that meeds any of the following conditions is flagged as 'unassembled' and removed from
+  A contig that needs any of the following conditions is flagged as 'unassembled' and removed from
   further consideration:
     - fewer than minReads reads (default 2)
     - shorter than minLength bases (default 0)
@@ -723,5 +845,5 @@ contigFilter <minReads, integer=2> <minLength, integer=0> <singleReadSpan, float
     - more than lowCovSpan fraction of the contig is at coverage below lowCovDepth (defaults 0.5, 5)
   This filtering is done immediately after initial contigs are formed, before potentially
   incorrectly spanned repeats are detected.  Initial contigs that incorrectly span a repeat can be
-  split into multiple conitgs; none of these new contigs will be flagged as 'unassembled', even if
+  split into multiple contigs; none of these new contigs will be flagged as 'unassembled', even if
   they are a single read.

@@ -9,20 +9,34 @@ ifeq "$(strip ${TARGET_DIR})" ""
 endif
 
 TARGET   := meryl
-SOURCES  := meryl-args.C \
-            meryl-binaryOp.C \
-            meryl-build.C \
-            meryl-dump.C \
-            meryl-estimate.C \
-            meryl-merge.C \
-            meryl-unaryOp.C \
-            meryl.C
+SOURCES  := meryl.C \
+            merylCountArray.C \
+            merylInput.C \
+            merylOp-count.C \
+            merylOp-countSimple.C \
+            merylOp-histogram.C \
+            merylOp-nextMer.C \
+            merylOp.C
 
-SRC_INCDIRS  := .. ../AS_UTL libleaff
+SRC_INCDIRS  := . .. ../utility ../stores
+
+#  If we're part of Canu, build with canu support.
+#  Otherwise, don't.
+
+ifneq ($(wildcard stores/sqStore.H), )
+
+SRC_CXXFLAGS := -DCANU
 
 TGT_LDFLAGS := -L${TARGET_DIR}/lib
-TGT_LDLIBS  := -lleaff -lcanu
-TGT_PREREQS := libleaff.a libcanu.a
+TGT_LDLIBS  := -lcanu
+TGT_PREREQS := libcanu.a
+
+else
+
+TGT_LDFLAGS := -L${TARGET_DIR}/lib
+TGT_LDLIBS  := -lmeryl
+TGT_PREREQS := libmeryl.a
+
+endif
 
 SUBMAKEFILES :=
-

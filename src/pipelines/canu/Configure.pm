@@ -35,6 +35,8 @@ require Exporter;
 @EXPORT = qw(getAllowedResources displayMemoryValue displayGenomeSize configureAssembler);
 
 use strict;
+use warnings "all";
+no  warnings "uninitialized";
 use Carp qw(cluck);
 use Sys::Hostname;
 
@@ -181,12 +183,14 @@ sub findGridMaxMemoryAndThreads () {
 #  the rest of canu - in particular, the part that runs the jobs - use the correct value.  Without
 #  resetting, I'd be making code changes all over the place to support the values returned.
 
+sub getAllowedResources ($$$$$@);  #  Recursive call to getAllowedResources() wants the prototype.
+
 sub getAllowedResources ($$$$$@) {
     my $tag  = shift @_;  #  Variant, e.g., "cor", "utg"
     my $alg  = shift @_;  #  Algorithm, e.g., "mhap", "ovl"
     my $err  = shift @_;  #  Report of things we can't run.
     my $all  = shift @_;  #  Report of things we can run.
-    my $uni  = shift @_;  #  There's only one task to run (meryl, bogart, gfa)
+    my $uni  = shift @_;  #  There's only one task to run (bogart, gfa)
     my $dbg  = shift @_;  #  Optional, report debugging stuff
 
     #  If no grid, or grid not enabled, everything falls under 'lcoal'.
@@ -316,21 +320,33 @@ sub getAllowedResources ($$$$$@) {
             my $cores     = 0;
             my $memory    = 0;
 
-            for (my $ii=0; $ii<scalar(@gridCor); $ii++) {
-                my $np_cpu = $gridNum[$ii] * int($gridCor[$ii] / $t);  #  Each process uses $t cores, node has $gridCor[$ii] cores available.
-                my $np_mem = $gridNum[$ii] * int($gridMem[$ii] / $m);  #  Each process uses $m GBs,   node ame $gridMem[$ii] GBs   available.
+            for (my $ii=0; $ii<scalar(@gridCor); $ii++) {                                 #  Each process uses:
+                my $np_cpu = $gridNum[$ii] * (($t == 0) ? 1 : int($gridCor[$ii] / $t));   #    $t cores, node has $gridCor[$ii] available.
+                my $np_mem = $gridNum[$ii] * (($m == 0) ? 1 : int($gridMem[$ii] / $m));   #    $m GBs,   node ame $gridMem[$ii] available.
 
                 my $np = ($np_cpu < $np_mem) ? $np_cpu : $np_mem;      #  Number of processes we can fit on this machine.
-
-                $np = 1  if ($uni);                                    #  But don't care if there is only one process to run!
 
                 if ($dbg) {
                     print STDERR "-- ERROR  for $t threads and $m memory - class$ii can support $np_cpu jobs(cores) and $np_mem jobs(memory), so $np jobs.\n";
                 }
 
-                $processes += $np;        #  Total number of processes running
-                $cores     += $np * $t;   #  Total cores in use
-                $memory    += $np * $m;   #  Total memory in use
+                #  If we only need to run one task, just remember if we can run the task on any machine here.
+
+                if ($uni) {
+                    if ($np > 0) {
+                        $processes  = 1;
+                        $cores      = $t;
+                        $memory     = $m;
+                    }
+                }
+
+                #  Otherwise, sum the number of processes we can run on the entire grid.
+
+                else {
+                    $processes += $np;        #  Total number of processes running
+                    $cores     += $np * $t;   #  Total cores in use
+                    $memory    += $np * $m;   #  Total memory in use
+                }
             }
 
             if ($dbg) {
@@ -399,24 +415,32 @@ sub getAllowedResources ($$$$$@) {
     my $concurrent = undef;  #  Undef if in grid mode.
 
     if ($class eq "local") {
-        my $nct = int($maxThreads / $taskThreads);
-        my $ncm = int($maxMemory  / $taskMemory);
+        my $nct = ($taskThreads == 0) ? 1 : int($maxThreads / $taskThreads);
+        my $ncm = ($taskMemory  == 0) ? 1 : int($maxMemory  / $taskMemory);
 
         my $nc  = ($nct < $ncm) ? $nct : $ncm;
 
-        $nc = 1  if ($uni);
+        $nc = 1  if (($uni) && ($nc > 0));
 
         #  If already set (on the command line), reset if too big.
 
-        if ($nc < getGlobal("${tag}${alg}Concurrency")) {
-            $err .= "-- Reset concurrency from ", getGlobal("${tag}${alg}Concurrency"), " to $nc.\n";
+        if (getGlobal("${tag}${alg}Concurrency") > $nc) {
+            $err .= "-- Reset concurrency from " . getGlobal("${tag}${alg}Concurrency") . " to $nc.\n";
             setGlobal("${tag}${alg}Concurrency", $nc);
         }
 
-        #  If not set, set it.
+        #  If not set, or set but zero, set it.
 
-        if (!defined(getGlobal("${tag}${alg}Concurrency"))) {
+        if (!defined(getGlobal("${tag}${alg}Concurrency")) ||
+            (getGlobal("${tag}${alg}Concurrency") == 0)) {
             setGlobal("${tag}${alg}Concurrency", $nc);
+        }
+
+        #  But if no memory set, set concurrency to zero.
+        #  This is mostly to get the report correct; if set to undef, we think this is a grid job.
+
+        if ($taskMemory == 0) {
+            setGlobal("${tag}${alg}Concurrency", 0);
         }
 
         #  Update the local variable for the report.
@@ -428,18 +452,20 @@ sub getAllowedResources ($$$$$@) {
 
     my $nam;
 
-    if    ($alg eq "meryl")    {  $nam = "(k-mer counting)"; }
-    elsif ($alg eq "mhap")     {  $nam = "(overlap detection with mhap)"; }
-    elsif ($alg eq "mmap")     {  $nam = "(overlap detection with minimap)"; }
-    elsif ($alg eq "ovl")      {  $nam = "(overlap detection)"; }
-    elsif ($alg eq "cor")      {  $nam = "(read correction)"; }
-    elsif ($alg eq "ovb")      {  $nam = "(overlap store bucketizer)"; }
-    elsif ($alg eq "ovs")      {  $nam = "(overlap store sorting)"; }
-    elsif ($alg eq "red")      {  $nam = "(read error detection)"; }
-    elsif ($alg eq "oea")      {  $nam = "(overlap error adjustment)"; }
-    elsif ($alg eq "bat")      {  $nam = "(contig construction)"; }
-    elsif ($alg eq "cns")      {  $nam = "(consensus)"; }
-    elsif ($alg eq "gfa")      {  $nam = "(GFA alignment and processing)"; }
+    if    ($alg eq "meryl")     {  $nam = "(k-mer counting)"; }
+    elsif ($alg eq "hap")       {  $nam = "(read-to-haplotype assignment)"; }
+    elsif ($alg eq "mhap")      {  $nam = "(overlap detection with mhap)"; }
+    elsif ($alg eq "mmap")      {  $nam = "(overlap detection with minimap)"; }
+    elsif ($alg eq "ovl")       {  $nam = "(overlap detection)"; }
+    elsif ($alg eq "cor")       {  $nam = "(read correction)"; }
+    elsif ($alg eq "ovb")       {  $nam = "(overlap store bucketizer)"; }
+    elsif ($alg eq "ovs")       {  $nam = "(overlap store sorting)"; }
+    elsif ($alg eq "red")       {  $nam = "(read error detection)"; }
+    elsif ($alg eq "oea")       {  $nam = "(overlap error adjustment)"; }
+    elsif ($alg eq "bat")       {  $nam = "(contig construction with bogart)"; }
+    elsif ($alg eq "dbg")       {  $nam = "(contig construction with wtdbg)"; }
+    elsif ($alg eq "cns")       {  $nam = "(consensus)"; }
+    elsif ($alg eq "gfa")       {  $nam = "(GFA alignment and processing)"; }
     else {
         caFailure("unknown task '$alg' in getAllowedResources().", undef);
     }
@@ -448,8 +474,15 @@ sub getAllowedResources ($$$$$@) {
     my $thr  = substr("    $taskThreads", -3) . " CPU" . (($taskThreads == 1) ? " " : "s");
     my $job  = substr("    $concurrent",  -3) . " job" . (($concurrent == 1) ? " " : "s");
 
-    my $memt = substr("     " . $mem * $job, -4) . " GB";
-    my $thrt = substr("     " . $thr * $job, -4) . " CPU" . (($thr * $job == 1) ? " " : "s");
+    my $memt = substr("     " . $taskMemory  * $concurrent, -4) . " GB";
+    my $thrt = substr("     " . $taskThreads * $concurrent, -4) . " CPU" . (($taskThreads * $concurrent == 1) ? " " : "s");
+
+    $mem  = " --- GB"     if ($taskMemory  == 0);
+    $thr  =  "--- CPUs"   if ($taskThreads == 0);
+    $job  =  "--- jobs"   if ($concurrent  == 0);
+
+    $memt = " --- GB"     if ($taskMemory  * $concurrent == 0);
+    $thrt = " --- CPUs"   if ($taskThreads * $concurrent == 0);
 
     my $t = substr("$tag$alg     ", 0, 7);
 
@@ -548,9 +581,10 @@ sub configureAssembler () {
 
     setGlobal("genomeSize", adjustGenomeSize(getGlobal("genomeSize")));
 
+    setGlobal("executiveMemory", adjustMemoryValue(getGlobal("executiveMemory")));
+
     setGlobal("minMemory",  adjustMemoryValue(getGlobal("minMemory")));
     setGlobal("maxMemory",  adjustMemoryValue(getGlobal("maxMemory")));
-
 
     #  For overlapper and mhap, allow larger maximums for larger genomes.  More memory won't help
     #  smaller genomes, and the smaller minimums won't hurt larger genomes (which are probably being
@@ -591,7 +625,7 @@ sub configureAssembler () {
     #  little more than the above number of different kmers.  The additional third in the expansion
     #  is to adjust for repeated kmers in the reads.
 
-    my $hx = 1.333 * 1000000;
+    my $hx = 1.25 * 1000000;
 
     if      (getGlobal("genomeSize") < adjustGenomeSize("40m")) {
         setGlobalIfUndef("corOvlHashBlockLength",     2500000);    setGlobalIfUndef("obtOvlHashBlockLength",    64 * $hx);    setGlobalIfUndef("utgOvlHashBlockLength",    64 * $hx);
@@ -679,55 +713,77 @@ sub configureAssembler () {
     #  inefficiency; too small and we run out of file handles.
 
     if      (getGlobal("genomeSize") < adjustGenomeSize("300m")) {
-        setGlobalIfUndef("ovsMethod", "sequential");
-        setGlobalIfUndef("ovbMemory",   "2-4");     setGlobalIfUndef("ovbThreads",   "1");
-        setGlobalIfUndef("ovsMemory",   "2-8");     setGlobalIfUndef("ovsThreads",   "1");
+        setGlobalIfUndef("ovbMemory",   "4");       setGlobalIfUndef("ovbThreads",   "1");
+        setGlobalIfUndef("ovsMemory",   "4-8");     setGlobalIfUndef("ovsThreads",   "1");
 
     } elsif (getGlobal("genomeSize") < adjustGenomeSize("1g")) {
-        setGlobalIfUndef("ovsMethod", "parallel");
-        setGlobalIfUndef("ovbMemory",   "2-4");     setGlobalIfUndef("ovbThreads",   "1");
-        setGlobalIfUndef("ovsMemory",   "4-16");    setGlobalIfUndef("ovsThreads",   "1");
+        setGlobalIfUndef("ovbMemory",   "4");       setGlobalIfUndef("ovbThreads",   "1");
+        setGlobalIfUndef("ovsMemory",   "8-16");    setGlobalIfUndef("ovsThreads",   "1");
 
     } else {
-        setGlobalIfUndef("ovsMethod", "parallel");
-        setGlobalIfUndef("ovbMemory",   "2-4");     setGlobalIfUndef("ovbThreads",   "1");
-        setGlobalIfUndef("ovsMemory",   "4-32");    setGlobalIfUndef("ovsThreads",   "1");
+        setGlobalIfUndef("ovbMemory",   "4");       setGlobalIfUndef("ovbThreads",   "1");
+        setGlobalIfUndef("ovsMemory",   "16-32");   setGlobalIfUndef("ovsThreads",   "1");
     }
 
     #  Correction and consensus are somewhat invariant.
     #    Correction memory is set based on read length in CorrectReads.pm.
     #    Consensus memory is set based on tig size in Consensus.pm.
+    #  Both are set to zero here, a special case that will configure only the thread component.
 
     if      (getGlobal("genomeSize") < adjustGenomeSize("40m")) {
-        setGlobalIfUndef("cnsMemory",     undef);      setGlobalIfUndef("cnsThreads",      "1-4");
-        setGlobalIfUndef("corMemory",     undef);      setGlobalIfUndef("corThreads",      "4");
+        setGlobalIfUndef("cnsMemory",     "0");        setGlobalIfUndef("cnsThreads",      "1-4");
+        setGlobalIfUndef("corMemory",     "0");        setGlobalIfUndef("corThreads",      "4");
         setGlobalIfUndef("cnsPartitions", "8");        setGlobalIfUndef("cnsPartitionMin", "15000");
         setGlobalIfUndef("corPartitions", "256");      setGlobalIfUndef("corPartitionMin", "5000");
 
     } elsif (getGlobal("genomeSize") < adjustGenomeSize("1g")) {
-        setGlobalIfUndef("cnsMemory",     undef);      setGlobalIfUndef("cnsThreads",      "2-8");
-        setGlobalIfUndef("corMemory",     undef);      setGlobalIfUndef("corThreads",      "4");
+        setGlobalIfUndef("cnsMemory",     "0");        setGlobalIfUndef("cnsThreads",      "2-8");
+        setGlobalIfUndef("corMemory",     "0");        setGlobalIfUndef("corThreads",      "4");
         setGlobalIfUndef("cnsPartitions", "64");       setGlobalIfUndef("cnsPartitionMin", "20000");
         setGlobalIfUndef("corPartitions", "512");      setGlobalIfUndef("corPartitionMin", "10000");
 
     } else {
-        setGlobalIfUndef("cnsMemory",     undef);      setGlobalIfUndef("cnsThreads",      "2-8");
-        setGlobalIfUndef("corMemory",     undef);      setGlobalIfUndef("corThreads",      "4");
+        setGlobalIfUndef("cnsMemory",     "0");        setGlobalIfUndef("cnsThreads",      "2-8");
+        setGlobalIfUndef("corMemory",     "0");        setGlobalIfUndef("corThreads",      "4");
         setGlobalIfUndef("cnsPartitions", "256");      setGlobalIfUndef("cnsPartitionMin", "25000");
         setGlobalIfUndef("corPartitions", "1024");     setGlobalIfUndef("corPartitionMin", "15000");
     }
 
     #  Meryl too, basically just small or big.  This should really be using the number of bases
-    #  reported from gatekeeper.
+    #  reported from sqStore.
 
     if      (getGlobal("genomeSize") < adjustGenomeSize("100m")) {
-        setGlobalIfUndef("merylMemory", "4-8");     setGlobalIfUndef("merylThreads", "1-4");
+        setGlobalIfUndef("merylMemory", "4-12");        setGlobalIfUndef("merylThreads", "1-4");
 
     } elsif (getGlobal("genomeSize") < adjustGenomeSize("1g")) {
-        setGlobalIfUndef("merylMemory", "16-64");    setGlobalIfUndef("merylThreads", "1-16");
+        setGlobalIfUndef("merylMemory", "12-24");       setGlobalIfUndef("merylThreads", "1-8");
 
     } else {
-        setGlobalIfUndef("merylMemory", "64-256");   setGlobalIfUndef("merylThreads", "1-32");
+        setGlobalIfUndef("merylMemory", "24-64");       setGlobalIfUndef("merylThreads", "1-8");
+    }
+
+    #  Total guesses on read-to-haplotype assignment.  A well-behaved nanopore human
+    #  was running in 2GB memory.
+
+    if      (getGlobal("genomeSize") < adjustGenomeSize("100m")) {
+        setGlobalIfUndef("hapMemory", "4-8");     setGlobalIfUndef("hapThreads", "1-4");
+
+    } elsif (getGlobal("genomeSize") < adjustGenomeSize("1g")) {
+        setGlobalIfUndef("hapMemory", "6-12");    setGlobalIfUndef("hapThreads", "8-24");
+
+    } else {
+        setGlobalIfUndef("hapMemory", "8-16");    setGlobalIfUndef("hapThreads", "16-64");
+    }
+
+
+    if (getGlobal("genomeSize") < 10000000) {
+        setGlobal("corOvlMerDistinct",  "0.9999")   if (!defined(getGlobal("corOvlMerThreshold")) && !defined(getGlobal("corOvlMerDistinct")));
+        setGlobal("obtOvlMerDistinct",  "0.9999")   if (!defined(getGlobal("obtOvlMerThreshold")) && !defined(getGlobal("obtOvlMerDistinct")));
+        setGlobal("utgOvlMerDistinct",  "0.9999")   if (!defined(getGlobal("utgOvlMerThreshold")) && !defined(getGlobal("utgOvlMerDistinct")));
+    } else {
+        setGlobal("corOvlMerDistinct",  "0.9990")   if (!defined(getGlobal("corOvlMerThreshold")) && !defined(getGlobal("corOvlMerDistinct")));
+        setGlobal("obtOvlMerDistinct",  "0.9990")   if (!defined(getGlobal("obtOvlMerThreshold")) && !defined(getGlobal("obtOvlMerDistinct")));
+        setGlobal("utgOvlMerDistinct",  "0.9990")   if (!defined(getGlobal("utgOvlMerThreshold")) && !defined(getGlobal("utgOvlMerDistinct")));
     }
 
     #  Overlap error adjustment
@@ -749,24 +805,24 @@ sub configureAssembler () {
     setGlobalIfUndef("oeaBatchLength", "300000000");
 
     if      (getGlobal("genomeSize") < adjustGenomeSize("40m")) {
-        setGlobalIfUndef("redMemory",   "2-4");    setGlobalIfUndef("redThreads",   "1-4");
-        setGlobalIfUndef("oeaMemory",   "4");      setGlobalIfUndef("oeaThreads",   "1");
+        setGlobalIfUndef("redMemory", "4-8");         setGlobalIfUndef("redThreads", "2-4");
+        setGlobalIfUndef("oeaMemory", "4");           setGlobalIfUndef("oeaThreads", "1");
 
     } elsif (getGlobal("genomeSize") < adjustGenomeSize("500m")) {
-        setGlobalIfUndef("redMemory",   "4-8");    setGlobalIfUndef("redThreads",   "1-4");
-        setGlobalIfUndef("oeaMemory",   "4");       setGlobalIfUndef("oeaThreads",   "1");
+        setGlobalIfUndef("redMemory", "6-10");        setGlobalIfUndef("redThreads", "4-6");
+        setGlobalIfUndef("oeaMemory", "4");           setGlobalIfUndef("oeaThreads", "1");
 
     } elsif (getGlobal("genomeSize") < adjustGenomeSize("2g")) {
-        setGlobalIfUndef("redMemory",   "4-8");    setGlobalIfUndef("redThreads",   "2-4");
-        setGlobalIfUndef("oeaMemory",   "4");       setGlobalIfUndef("oeaThreads",   "1");
+        setGlobalIfUndef("redMemory", "8-12");         setGlobalIfUndef("redThreads", "4-8");
+        setGlobalIfUndef("oeaMemory", "4");           setGlobalIfUndef("oeaThreads", "1");
 
     } elsif (getGlobal("genomeSize") < adjustGenomeSize("5g")) {
-        setGlobalIfUndef("redMemory",   "4-16");    setGlobalIfUndef("redThreads",   "2-4");
-        setGlobalIfUndef("oeaMemory",   "8");       setGlobalIfUndef("oeaThreads",   "1");
+        setGlobalIfUndef("redMemory", "8-16");        setGlobalIfUndef("redThreads", "4-8");
+        setGlobalIfUndef("oeaMemory", "8");           setGlobalIfUndef("oeaThreads", "1");
 
     } else {
-        setGlobalIfUndef("redMemory",   "4-16");    setGlobalIfUndef("redThreads",   "2-4");
-        setGlobalIfUndef("oeaMemory",   "8");       setGlobalIfUndef("oeaThreads",   "1");
+        setGlobalIfUndef("redMemory", "12-20");       setGlobalIfUndef("redThreads", "6-10");
+        setGlobalIfUndef("oeaMemory", "8");           setGlobalIfUndef("oeaThreads", "1");
     }
 
     #  And bogart and GFA alignment/processing.
@@ -774,24 +830,34 @@ sub configureAssembler () {
     #  GFA for genomes less than 40m is run in the canu process itself.
 
     if      (getGlobal("genomeSize") < adjustGenomeSize("40m")) {
-        setGlobalIfUndef("batMemory",   "2-16");        setGlobalIfUndef("batThreads",   "1-4");
-        setGlobalIfUndef("gfaMemory",   "2-8");         setGlobalIfUndef("gfaThreads",   "1-4");
+        setGlobalIfUndef("batMemory", "4-16");        setGlobalIfUndef("batThreads", "2-4");
+        setGlobalIfUndef("dbgMemory", "4-16");        setGlobalIfUndef("dbgThreads", "2-4");
+
+        setGlobalIfUndef("gfaMemory", "2-8");         setGlobalIfUndef("gfaThreads", "1-4");
 
     } elsif (getGlobal("genomeSize") < adjustGenomeSize("500m")) {
-        setGlobalIfUndef("batMemory",   "16-64");       setGlobalIfUndef("batThreads",   "2-8");
-        setGlobalIfUndef("gfaMemory",   "4-8");         setGlobalIfUndef("gfaThreads",   "2-8");
+        setGlobalIfUndef("batMemory", "16-64");       setGlobalIfUndef("batThreads", "2-8");
+        setGlobalIfUndef("dbgMemory", "8-64");       setGlobalIfUndef("dbgThreads", "2-8");
+
+        setGlobalIfUndef("gfaMemory", "4-8");         setGlobalIfUndef("gfaThreads", "2-8");
 
     } elsif (getGlobal("genomeSize") < adjustGenomeSize("2g")) {
-        setGlobalIfUndef("batMemory",   "32-256");      setGlobalIfUndef("batThreads",   "4-16");
-        setGlobalIfUndef("gfaMemory",   "8-16");         setGlobalIfUndef("gfaThreads",  "4-16");
+        setGlobalIfUndef("batMemory", "32-256");      setGlobalIfUndef("batThreads", "4-16");
+        setGlobalIfUndef("dbgMemory", "32-256");      setGlobalIfUndef("dbgThreads", "4-16");
+
+        setGlobalIfUndef("gfaMemory", "8-16");        setGlobalIfUndef("gfaThreads", "4-16");
 
     } elsif (getGlobal("genomeSize") < adjustGenomeSize("5g")) {
-        setGlobalIfUndef("batMemory",   "128-512");     setGlobalIfUndef("batThreads",   "8-32");
-        setGlobalIfUndef("gfaMemory",   "16-32");        setGlobalIfUndef("gfaThreads",  "8-32");
+        setGlobalIfUndef("batMemory", "128-512");     setGlobalIfUndef("batThreads", "8-32");
+        setGlobalIfUndef("dbgMemory", "128-512");     setGlobalIfUndef("dbgThreads", "8-32");
+
+        setGlobalIfUndef("gfaMemory", "16-32");       setGlobalIfUndef("gfaThreads", "8-32");
 
     } else {
-        setGlobalIfUndef("batMemory",   "256-1024");    setGlobalIfUndef("batThreads",   "16-64");
-        setGlobalIfUndef("gfaMemory",   "32-64");       setGlobalIfUndef("gfaThreads",   "16-64");
+        setGlobalIfUndef("batMemory", "256-1024");    setGlobalIfUndef("batThreads", "16-64");
+        setGlobalIfUndef("dbgMemory", "128-1024");    setGlobalIfUndef("dbgThreads", "16-64");
+
+        setGlobalIfUndef("gfaMemory", "32-64");       setGlobalIfUndef("gfaThreads", "16-64");
     }
 
 
@@ -806,34 +872,36 @@ sub configureAssembler () {
     my $err;
     my $all;
 
-    ($err, $all) = getAllowedResources("",    "meryl",    $err, $all, 1);
+    ($err, $all) = getAllowedResources("",    "meryl",     $err, $all, 0);
 
-    ($err, $all) = getAllowedResources("cor", "mhap",     $err, $all, 0)   if (getGlobal("corOverlapper") eq "mhap");
-    ($err, $all) = getAllowedResources("cor", "mmap",     $err, $all, 0)   if (getGlobal("corOverlapper") eq "minimap");
-    ($err, $all) = getAllowedResources("cor", "ovl",      $err, $all, 0)   if (getGlobal("corOverlapper") eq "ovl");
+    ($err, $all) = getAllowedResources("",    "hap",       $err, $all, 0);
 
-    ($err, $all) = getAllowedResources("obt", "mhap",     $err, $all, 0)   if (getGlobal("obtOverlapper") eq "mhap");
-    ($err, $all) = getAllowedResources("obt", "mmap",     $err, $all, 0)   if (getGlobal("obtOverlapper") eq "minimap");
-    ($err, $all) = getAllowedResources("obt", "ovl",      $err, $all, 0)   if (getGlobal("obtOverlapper") eq "ovl");
+    ($err, $all) = getAllowedResources("cor", "mhap",      $err, $all, 0)   if (getGlobal("corOverlapper") eq "mhap");
+    ($err, $all) = getAllowedResources("cor", "mmap",      $err, $all, 0)   if (getGlobal("corOverlapper") eq "minimap");
+    ($err, $all) = getAllowedResources("cor", "ovl",       $err, $all, 0)   if (getGlobal("corOverlapper") eq "ovl");
 
-    ($err, $all) = getAllowedResources("utg", "mhap",     $err, $all, 0)   if (getGlobal("utgOverlapper") eq "mhap");
-    ($err, $all) = getAllowedResources("utg", "mmap",     $err, $all, 0)   if (getGlobal("utgOverlapper") eq "minimap");
-    ($err, $all) = getAllowedResources("utg", "ovl",      $err, $all, 0)   if (getGlobal("utgOverlapper") eq "ovl");
+    ($err, $all) = getAllowedResources("obt", "mhap",      $err, $all, 0)   if (getGlobal("obtOverlapper") eq "mhap");
+    ($err, $all) = getAllowedResources("obt", "mmap",      $err, $all, 0)   if (getGlobal("obtOverlapper") eq "minimap");
+    ($err, $all) = getAllowedResources("obt", "ovl",       $err, $all, 0)   if (getGlobal("obtOverlapper") eq "ovl");
 
-    #  Usually set based on read length in CorrectReads.pm.  If defined by the user, run through configuration.
-    ($err, $all) = getAllowedResources("",    "cor",      $err, $all, 0)   if (getGlobal("corMemory") ne undef);
+    ($err, $all) = getAllowedResources("utg", "mhap",      $err, $all, 0)   if (getGlobal("utgOverlapper") eq "mhap");
+    ($err, $all) = getAllowedResources("utg", "mmap",      $err, $all, 0)   if (getGlobal("utgOverlapper") eq "minimap");
+    ($err, $all) = getAllowedResources("utg", "ovl",       $err, $all, 0)   if (getGlobal("utgOverlapper") eq "ovl");
 
-    ($err, $all) = getAllowedResources("",    "ovb",      $err, $all, 0);
-    ($err, $all) = getAllowedResources("",    "ovs",      $err, $all, 0);
+    ($err, $all) = getAllowedResources("",    "cor",       $err, $all, 0);
 
-    ($err, $all) = getAllowedResources("",    "red",      $err, $all, 0);
-    ($err, $all) = getAllowedResources("",    "oea",      $err, $all, 0);
+    ($err, $all) = getAllowedResources("",    "ovb",       $err, $all, 0);
+    ($err, $all) = getAllowedResources("",    "ovs",       $err, $all, 0);
 
-    ($err, $all) = getAllowedResources("",    "bat",      $err, $all, 1);
+    ($err, $all) = getAllowedResources("",    "red",       $err, $all, 0);
+    ($err, $all) = getAllowedResources("",    "oea",       $err, $all, 0);
 
-    ($err, $all) = getAllowedResources("",    "cns",      $err, $all, 0)   if (getGlobal("cnsMemory") ne undef);
+    ($err, $all) = getAllowedResources("",    "bat",       $err, $all, 1)   if (uc(getGlobal("unitigger")) eq "BOGART");
+    ($err, $all) = getAllowedResources("",    "dbg",       $err, $all, 1)   if (uc(getGlobal("unitigger")) eq "WTDBG");
 
-    ($err, $all) = getAllowedResources("",    "gfa",      $err, $all, 1);
+    ($err, $all) = getAllowedResources("",    "cns",       $err, $all, 0);
+
+    ($err, $all) = getAllowedResources("",    "gfa",       $err, $all, 1);
 
     #  Check some minimums.
 

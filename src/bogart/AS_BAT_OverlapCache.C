@@ -49,7 +49,7 @@
 #include "AS_BAT_Unitig.H"            //  sizeof(ufNode)
 #include "AS_BAT_Logging.H"
 
-#include "memoryMappedFile.H"
+#include "system.H"
 
 #include <sys/types.h>
 
@@ -158,12 +158,12 @@ OverlapCache::OverlapCache(const char *ovlStorePath,
   _maxEvalue     = AS_OVS_encodeEvalue(maxErate);
   _minOverlap    = minOverlap;
 
-  //  Allocate space to load overlaps.  With a NULL gkpStore we can't call the bgn or end methods.
+  //  Allocate space to load overlaps.  With a NULL seqStore we can't call the bgn or end methods.
 
-  _ovsMax  = 16;
-  _ovs     = ovOverlap::allocateOverlaps(NULL, _ovsMax);
-  _ovsSco  = new uint64     [_ovsMax];
-  _ovsTmp  = new uint64     [_ovsMax];
+  _ovsMax  = 0;
+  _ovs     = NULL;
+  _ovsSco  = NULL;
+  _ovsTmp  = NULL;
 
   //  Allocate pointers to overlaps.
 
@@ -226,12 +226,9 @@ OverlapCache::~OverlapCache() {
 
 void
 OverlapCache::computeOverlapLimit(ovStore *ovlStore, uint64 genomeSize) {
-
-  ovlStore->resetRange();
-
   uint32  frstRead  = 0;
   uint32  lastRead  = 0;
-  uint32 *numPer    = ovlStore->numOverlapsPerRead(RI->numReads());
+  uint32 *numPer    = ovlStore->numOverlapsPerRead();
 
   //  Set the minimum number of overlaps per read to twice coverage.  Then set the maximum number of
   //  overlaps per read to a guess of what it will take to fill up memory.
@@ -247,6 +244,8 @@ OverlapCache::computeOverlapLimit(ovStore *ovlStore, uint64 genomeSize) {
     writeStatus("OverlapCache()-- Not enough memory to load the minimum number of overlaps; increase -M.\n"), exit(1);
 
   uint64  totalOlaps = ovlStore->numOverlapsInRange();
+
+  assert(totalOlaps > 0);
 
   uint64  olapLoad   = 0;  //  Total overlaps we would load at this threshold
   uint64  olapMem    = 0;
@@ -344,7 +343,7 @@ uint32
 OverlapCache::filterDuplicates(uint32 &no) {
   uint32   nFiltered = 0;
 
-  for (uint32 ii=0, jj=1; jj<no; ii++, jj++) {
+  for (uint32 ii=0, jj=1, dd=0; jj<no; ii++, jj++) {
     if (_ovs[ii].b_iid != _ovs[jj].b_iid)
       continue;
 
@@ -352,22 +351,35 @@ OverlapCache::filterDuplicates(uint32 &no) {
 
     nFiltered++;
 
-    //  Drop the shorter overlap, or the one with the higher erate.
+    //  Drop the weaker overlap.  If a tie, drop the flipped one.
 
-    uint32  iilen = RI->overlapLength(_ovs[ii].a_iid, _ovs[ii].b_iid, _ovs[ii].a_hang(), _ovs[ii].b_hang());
-    uint32  jjlen = RI->overlapLength(_ovs[jj].a_iid, _ovs[jj].b_iid, _ovs[jj].a_hang(), _ovs[jj].b_hang());
+    double iiSco = RI->overlapLength(_ovs[ii].a_iid, _ovs[ii].b_iid, _ovs[ii].a_hang(), _ovs[ii].b_hang()) * _ovs[ii].erate();
+    double jjSco = RI->overlapLength(_ovs[jj].a_iid, _ovs[jj].b_iid, _ovs[jj].a_hang(), _ovs[jj].b_hang()) * _ovs[jj].erate();
 
-    if (iilen == jjlen) {
-      if (_ovs[ii].evalue() < _ovs[jj].evalue())
-        jjlen = 0;
-      else
-        iilen = 0;
+    if (iiSco == jjSco) {             //  Hey gcc!  See how nice I was by putting brackets
+      if (_ovs[ii].flipped())         //  around this so you don't get confused by the
+        iiSco = 0;                    //  non-ambiguous ambiguous else clause?
+      else                            //
+        jjSco = 0;                    //  You're welcome.
     }
 
-    if (iilen < jjlen)
-      _ovs[ii].a_iid = _ovs[ii].b_iid = 0;
+    if (iiSco < jjSco)
+      dd = ii;
     else
-      _ovs[jj].a_iid = _ovs[jj].b_iid = 0;
+      dd = jj;
+
+#if 0
+    writeLog("OverlapCache::filterDuplicates()-- Dropping overlap A: %9" F_U64P " B: %9" F_U64P " - %6.4f%% - %6" F_S32P " %6" F_S32P " - %s\n",
+             _ovs[dd].a_iid,
+             _ovs[dd].b_iid,
+             _ovs[dd].a_hang(),
+             _ovs[dd].b_hang(),
+             _ovs[dd].erate(),
+             _ovs[dd].flipped() ? "flipped" : "");
+#endif
+
+    _ovs[dd].a_iid = 0;
+    _ovs[dd].b_iid = 0;
   }
 
   //  If nothing was filtered, return.
@@ -507,45 +519,40 @@ OverlapCache::loadOverlaps(ovStore *ovlStore, bool doSave) {
   writeStatus("OverlapCache()--          read from store           saved in cache\n");
   writeStatus("OverlapCache()--   ------------ ---------   ------------ ---------\n");
 
-  ovlStore->resetRange();
-
   uint64   numTotal     = 0;
   uint64   numLoaded    = 0;
   uint64   numDups      = 0;
   uint32   numReads     = 0;
   uint64   numStore     = ovlStore->numOverlapsInRange();
 
-  if (numStore == 0)
-    writeStatus("ERROR: No overlaps in overlap store?\n"), exit(1);
+  assert(numStore > 0);
 
   _overlapStorage = new OverlapStorage(ovlStore->numOverlapsInRange());
 
-  while (1) {
-    uint32  numOvl = ovlStore->numberOfOverlaps();   //  Query how many overlaps for the next read.
+  //  Scan the overlaps, finding the maximum number of overlaps for a single read.  This lets
+  //  us pre-allocate space and simplifies the loading process.
 
-    if (numOvl == 0)    //  If no overlaps, we're at the end of the store.
-      break;
+  assert(_ovsMax == 0);
+  assert(_ovs    == NULL);
 
-    if (_ovsMax < numOvl) {
-      delete [] _ovs;
-      delete [] _ovsSco;
-      delete [] _ovsTmp;
+  _ovsMax = 0;
 
-      _ovsMax  = numOvl + 1024;
+  for (uint32 rr=0; rr<RI->numReads()+1; rr++)
+    _ovsMax = max(_ovsMax, ovlStore->numOverlaps(rr));
 
-      _ovs     = ovOverlap::allocateOverlaps(NULL /* gkpStore */, _ovsMax);
-      _ovsSco  = new uint64     [_ovsMax];
-      _ovsTmp  = new uint64     [_ovsMax];
-    }
+  _ovs     = ovOverlap::allocateOverlaps(NULL /* seqStore */, _ovsMax);
+  _ovsSco  = new uint64 [_ovsMax];
+  _ovsTmp  = new uint64 [_ovsMax];
 
-    assert(numOvl <= _ovsMax);
+
+  for (uint32 rr=0; rr<RI->numReads()+1; rr++) {
 
     //  Actually load the overlaps, then detect and remove overlaps between the same pair, then
     //  filter short and low quality overlaps.
 
-    uint32  no = ovlStore->readOverlaps(_ovs, _ovsMax);     //  no == total overlaps == numOvl
-    uint32  nd = filterDuplicates(no);                           //  nd == duplicated overlaps (no is decreased by this amount)
-    uint32  ns = filterOverlaps(_maxEvalue, _minOverlap, no);    //  ns == acceptable overlaps
+    uint32  no = ovlStore->loadOverlapsForRead(rr, _ovs, _ovsMax);   //  no == total overlaps == numOvl
+    uint32  nd = filterDuplicates(no);                               //  nd == duplicated overlaps (no is decreased by this amount)
+    uint32  ns = filterOverlaps(_maxEvalue, _minOverlap, no);        //  ns == acceptable overlaps
 
     //if (_ovs[0].a_iid == 3514657)
     //  fprintf(stderr, "Loaded %u overlaps - no %u nd %u ns %u\n", numOvl, no, nd, ns);
@@ -616,30 +623,29 @@ OverlapCache::loadOverlaps(ovStore *ovlStore, bool doSave) {
 
 
 
+//  Binary search a list of overlaps for one matching bID and flipped.
 bool
-searchForOverlap(BAToverlap *ovl, uint32 ovlLen, uint32 bID) {
+searchForOverlap(BAToverlap *ovl, uint32 ovlLen, uint32 bID, bool flipped) {
+  int32  F = 0;
+  int32  L = ovlLen - 1;
+  int32  M = 0;
 
 #ifdef TEST_LINEAR_SEARCH
   bool linearSearchFound = false;
 
   for (uint32 ss=0; ss<ovlLen; ss++)
-    if (ovl[ss].b_iid == bID) {
+    if ((ovl[ss].b_iid   == bID) &&
+        (ovl[ss].flipped == flipped)) {
       linearSearchFound = true;
       break;
     }
 #endif
 
-  //  If not, these are repeats and we should binary search everything.
-  //  There will be no short lists where we could exhaustively search.
-
-  int32  F = 0;
-  int32  L = ovlLen - 1;
-  int32  M = 0;
-
   while (F <= L) {
     M = (F + L) / 2;
 
-    if (ovl[M].b_iid == bID) {
+    if ((ovl[M].b_iid   == bID) &&
+        (ovl[M].flipped == flipped)) {
       ovl[M].symmetric = true;
 #ifdef TEST_LINEAR_SEARCH
       assert(linearSearchFound == true);
@@ -647,7 +653,8 @@ searchForOverlap(BAToverlap *ovl, uint32 ovlLen, uint32 bID) {
       return(true);
     }
 
-    if (ovl[M].b_iid < bID)
+    if (((ovl[M].b_iid  < bID)) ||
+        ((ovl[M].b_iid == bID) && (ovl[M].flipped < flipped)))
       F = M+1;
     else
       L = M-1;
@@ -676,7 +683,7 @@ OverlapCache::symmetrizeOverlaps(void) {
 
   //  For each overlap, see if the twin overlap exists.  It is tempting to skip searching if the
   //  b-read has loaded all overlaps (the overlap we're searching for must exist) but we can't.
-  //  We must still mark the oevrlap as being symmetric.
+  //  We must still mark the overlap as being symmetric.
 
   writeStatus("OverlapCache()--\n");
   writeStatus("OverlapCache()-- Symmetrizing overlaps.\n");
@@ -694,7 +701,7 @@ OverlapCache::symmetrizeOverlaps(void) {
 
       //  Search for the twin overlap, and if found, we're done.  The twin is marked as symmetric in the function.
 
-      if (searchForOverlap(_overlaps[rb], _overlapLen[rb], rr)) {
+      if (searchForOverlap(_overlaps[rb], _overlapLen[rb], rr, _overlaps[rr][oo].flipped)) {
         _overlaps[rr][oo].symmetric = true;
         continue;
       }
@@ -967,7 +974,7 @@ OverlapCache::load(void) {
   size_t   numRead;
 
   snprintf(name, FILENAME_MAX, "%s.ovlCache", _prefix);
-  if (AS_UTL_fileExists(name, FALSE, FALSE) == false)
+  if (fileExists(name) == false)
     return(false);
 
   writeStatus("OverlapCache()-- Loading graph from '%s'.\n", name);
@@ -978,26 +985,26 @@ OverlapCache::load(void) {
   uint32   ovserrbits = AS_MAX_EVALUE_BITS;
   uint32   ovshngbits = AS_MAX_READLEN_BITS + 1;
 
-  AS_UTL_safeRead(file, &magic,      "overlapCache_magic",      sizeof(uint64), 1);
-  AS_UTL_safeRead(file, &ovserrbits, "overlapCache_ovserrbits", sizeof(uint32), 1);
-  AS_UTL_safeRead(file, &ovshngbits, "overlapCache_ovshngbits", sizeof(uint32), 1);
+  loadFromFile(magic,      "overlapCache_magic",      file);
+  loadFromFile(ovserrbits, "overlapCache_ovserrbits", file);
+  loadFromFile(ovshngbits, "overlapCache_ovshngbits", file);
 
   if (magic != ovlCacheMagic)
     writeStatus("OverlapCache()-- ERROR:  File '%s' isn't a bogart ovlCache.\n", name), exit(1);
 
-  AS_UTL_safeRead(file, &_memLimit,    "overlapCache_memLimit",    sizeof(uint64), 1);
-  AS_UTL_safeRead(file, &_memReserved, "overlapCache_memReserved", sizeof(uint64), 1);
-  AS_UTL_safeRead(file, &_memAvail,    "overlapCache_memAvail",    sizeof(uint64), 1);
-  AS_UTL_safeRead(file, &_memStore,    "overlapCache_memStore",    sizeof(uint64), 1);
-  AS_UTL_safeRead(file, &_memOlaps,    "overlapCache_memOlaps",    sizeof(uint64), 1);
-  AS_UTL_safeRead(file, &_maxPer,      "overlapCache_maxPer",      sizeof(uint32), 1);
+  loadFromFile(_memLimit,    "overlapCache_memLimit",    file);
+  loadFromFile(_memReserved, "overlapCache_memReserved", file);
+  loadFromFile(_memAvail,    "overlapCache_memAvail",    file);
+  loadFromFile(_memStore,    "overlapCache_memStore",    file);
+  loadFromFile(_memOlaps,    "overlapCache_memOlaps",    file);
+  loadFromFile(_maxPer,      "overlapCache_maxPer",      file);
 
   _overlaps   = new BAToverlap * [RI->numReads() + 1];
   _overlapLen = new uint32       [RI->numReads() + 1];
   _overlapMax = new uint32       [RI->numReads() + 1];
 
-  AS_UTL_safeRead(file, _overlapLen, "overlapCache_len", sizeof(uint32), RI->numReads() + 1);
-  AS_UTL_safeRead(file, _overlapMax, "overlapCache_max", sizeof(uint32), RI->numReads() + 1);
+  loadFromFile(_overlapLen, "overlapCache_len", RI->numReads() + 1, file);
+  loadFromFile(_overlapMax, "overlapCache_max", RI->numReads() + 1, file);
 
   for (uint32 rr=0; rr<RI->numReads() + 1; rr++) {
     if (_overlapLen[rr] == 0)
@@ -1006,7 +1013,7 @@ OverlapCache::load(void) {
     _overlaps[rr] = new BAToverlap [ _overlapMax[rr] ];
     memset(_overlaps[rr], 0xff, sizeof(BAToverlap) * _overlapMax[rr]);
 
-    AS_UTL_safeRead(file, _overlaps[rr], "overlapCache_ovl", sizeof(BAToverlap), _overlapLen[rr]);
+    loadFromFile(_overlaps[rr], "overlapCache_ovl", _overlapLen[rr], file);
 
     assert(_overlaps[rr][0].a_iid == rr);
   }
@@ -1035,22 +1042,22 @@ OverlapCache::save(void) {
   uint32   ovserrbits = AS_MAX_EVALUE_BITS;
   uint32   ovshngbits = AS_MAX_READLEN_BITS + 1;
 
-  AS_UTL_safeWrite(file, &magic,        "overlapCache_magic",       sizeof(uint64), 1);
-  AS_UTL_safeWrite(file, &ovserrbits,   "overlapCache_ovserrbits",  sizeof(uint32), 1);
-  AS_UTL_safeWrite(file, &ovshngbits,   "overlapCache_ovshngbits",  sizeof(uint32), 1);
+  writeToFile(magic,        "overlapCache_magic",       file);
+  writeToFile(ovserrbits,   "overlapCache_ovserrbits",  file);
+  writeToFile(ovshngbits,   "overlapCache_ovshngbits",  file);
 
-  AS_UTL_safeWrite(file, &_memLimit,    "overlapCache_memLimit",    sizeof(uint64), 1);
-  AS_UTL_safeWrite(file, &_memReserved, "overlapCache_memReserved", sizeof(uint64), 1);
-  AS_UTL_safeWrite(file, &_memAvail,    "overlapCache_memAvail",    sizeof(uint64), 1);
-  AS_UTL_safeWrite(file, &_memStore,    "overlapCache_memStore",    sizeof(uint64), 1);
-  AS_UTL_safeWrite(file, &_memOlaps,    "overlapCache_memOlaps",    sizeof(uint64), 1);
-  AS_UTL_safeWrite(file, &_maxPer,      "overlapCache_maxPer",      sizeof(uint32), 1);
+  writeToFile(_memLimit,    "overlapCache_memLimit",    file);
+  writeToFile(_memReserved, "overlapCache_memReserved", file);
+  writeToFile(_memAvail,    "overlapCache_memAvail",    file);
+  writeToFile(_memStore,    "overlapCache_memStore",    file);
+  writeToFile(_memOlaps,    "overlapCache_memOlaps",    file);
+  writeToFile(_maxPer,      "overlapCache_maxPer",      file);
 
-  AS_UTL_safeWrite(file,  _overlapLen,  "overlapCache_len",         sizeof(uint32), RI->numReads() + 1);
-  AS_UTL_safeWrite(file,  _overlapMax,  "overlapCache_max",         sizeof(uint32), RI->numReads() + 1);
+  writeToFile(_overlapLen,  "overlapCache_len",         RI->numReads() + 1, file);
+  writetoFile(_overlapMax,  "overlapCache_max",         RI->numReads() + 1, file);
 
   for (uint32 rr=0; rr<RI->numReads() + 1; rr++)
-    AS_UTL_safeWrite(file,  _overlaps[rr],   "overlapCache_ovl", sizeof(BAToverlap), _overlapLen[rr]);
+    writeToFile(_overlaps[rr],   "overlapCache_ovl", _overlapLen[rr], file);
 
   AS_UTL_closeFile(file, name);
 #endif

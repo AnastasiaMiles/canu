@@ -40,10 +40,10 @@
  */
 
 #include "AS_global.H"
-#include "gkStore.H"
-#include "AS_UTL_decodeRange.H"
+#include "sqStore.H"
+#include "strings.H"
 
-//  Reads gkpStore, outputs three files:
+//  Reads seqStore, outputs three files:
 //    ovlbat - batch names
 //    ovljob - job names
 //    ovlopt - overlapper options
@@ -52,46 +52,14 @@
 
 uint32  batchMax = 1000;
 
-void
-outputJob(FILE   *BAT,
-          FILE   *JOB,
-          FILE   *OPT,
-          uint32  hashBeg, uint32  hashEnd, uint32  numHashReads, uint64  numHashBases,
-          uint32  refBeg,  uint32  refEnd,  uint32  numRefReads,  uint64  numRefBases,
-          uint32 &batchSize,
-          uint32 &batchName,
-          uint32 &jobName) {
-
-  fprintf(BAT, "%03" F_U32P "\n", batchName);
-  fprintf(JOB, "%06" F_U32P "\n", jobName);
-
-  if (numHashReads == 0)
-    fprintf(OPT, "-h " F_U32 "-" F_U32 " -r " F_U32 "-" F_U32 "\n", hashBeg, hashEnd, refBeg, refEnd);
-  else
-    fprintf(OPT, "-h " F_U32 "-" F_U32 " -r " F_U32 "-" F_U32 " --hashstrings " F_U32 " --hashdatalen " F_U64 "\n", hashBeg, hashEnd, refBeg, refEnd, numHashReads, numHashBases);
-
-  fprintf(stderr, "%5" F_U32P " %10" F_U32P "-%-10" F_U32P " %9" F_U32P " %12" F_U64P "  %10" F_U32P "-%-10" F_U32P " %9" F_U32P " %12" F_U64P "\n", jobName, hashBeg, hashEnd, numHashReads, numHashBases, refBeg, refEnd, numRefReads, numRefBases);
-
-  refBeg = refEnd + 1;
-
-  batchSize++;
-
-  if (batchSize >= batchMax) {
-    batchSize = 0;
-    batchName++;
-  }
-
-  jobName++;
-}
-
 
 
 uint32 *
-loadReadLengths(gkStore *gkp,
+loadReadLengths(sqStore *seq,
                 set<uint32> &libToHash, uint32 &hashMin, uint32 &hashMax,
                 set<uint32> &libToRef,  uint32 &refMin,  uint32 &refMax) {
-  uint32     numReads = gkp->gkStore_getNumReads();
-  uint32     numLibs  = gkp->gkStore_getNumLibraries();
+  uint32     numReads = seq->sqStore_getNumReads();
+  uint32     numLibs  = seq->sqStore_getNumLibraries();
   uint32    *readLen  = new uint32 [numReads + 1];
 
   bool testHash = false;
@@ -131,39 +99,43 @@ loadReadLengths(gkStore *gkp,
   fprintf(stderr, "     Reads        Bases      Reads        Bases      Reads        Bases\n");
   fprintf(stderr, "---------- ------------ ---------- ------------ ---------- ------------\n");
 
-  uint32  reportInterval = numReads / 40;
+  uint32  reportInterval = numReads / 39 + 1;
 
   for (uint32 ii=1; ii<=numReads; ii++) {
-    gkRead  *read = gkp->gkStore_getRead(ii);
+    sqRead  *read = seq->sqStore_getRead(ii);
 
-    if (read->gkRead_readID() != ii)
+    if (read->sqRead_readID() != ii)
       fprintf(stderr, "ERROR: readID=%u != ii=%u\n",
-              read->gkRead_readID(), ii);
-    assert(read->gkRead_readID() == ii);
+              read->sqRead_readID(), ii);
+    assert(read->sqRead_readID() == ii);
 
-    if (read->gkRead_rawLength() > 0) {
+    uint32 rr = read->sqRead_sequenceLength(sqRead_raw);
+    uint32 rc = read->sqRead_sequenceLength(sqRead_corrected);
+    uint32 rt = read->sqRead_sequenceLength(sqRead_trimmed);
+
+    if (rr > 0) {
       rawReads += 1;
-      rawBases += read->gkRead_rawLength();
+      rawBases += rr;
     }
 
-    if (read->gkRead_correctedLength() > 0) {
+    if (rc > 0) {
       corReads += 1;
-      corBases += read->gkRead_correctedLength();
+      corBases += rc;
     }
 
-    if (read->gkRead_trimmedLength() > 0) {
+    if (rt > 0) {
       triReads += 1;
-      triBases += read->gkRead_trimmedLength();
+      triBases += rt;
     }
 
-    readLen[ii] = read->gkRead_sequenceLength();
+    readLen[ii] = read->sqRead_sequenceLength();
 
-    if ((testHash == true) && (doHash[read->gkRead_libraryID()] == true)) {
+    if ((testHash == true) && (doHash[read->sqRead_libraryID()] == true)) {
       hashMin = min(hashMin, ii);
       hashMax = max(hashMax, ii);
     }
 
-    if ((testRef == true) && (doRef[read->gkRead_libraryID()] == true)) {
+    if ((testRef == true) && (doRef[read->sqRead_libraryID()] == true)) {
       refMin = min(refMin, ii);
       refMax = max(refMax, ii);
     }
@@ -187,7 +159,7 @@ loadReadLengths(gkStore *gkp,
 
 
 void
-partitionLength(gkStore      *gkp,
+partitionLength(sqStore      *seq,
                 uint32       *readLen,
                 FILE         *BAT,
                 FILE         *JOB,
@@ -215,7 +187,7 @@ partitionLength(gkStore      *gkp,
   uint32  batchName = 1;    //  Name of the directory
   uint32  jobName   = 1;    //  Name of the job
 
-  uint32  numReads = gkp->gkStore_getNumReads();
+  uint32  numReads = seq->sqStore_getNumReads();
 
   if (hashMax > numReads)
     hashMax = numReads;
@@ -280,13 +252,28 @@ partitionLength(gkStore      *gkp,
       if ((refEnd > hashEnd) && (libToHash.size() == 0 || libToHash != libToRef))
         refEnd = hashEnd;
 
-      outputJob(BAT,
-                JOB,
-                OPT,
-                hashBeg, hashEnd, hashReads, hashBases,
-                refBeg,  refEnd,  refReads,  refBases,
-                //hashEnd - hashBeg + 1, hashLen,
-                batchSize, batchName, jobName);
+      //  Output the job.
+
+      fprintf(BAT, "%03" F_U32P "\n", batchName);
+      fprintf(JOB, "%06" F_U32P "\n", jobName);
+
+      if (hashReads == 0)
+        fprintf(OPT, "-h " F_U32 "-" F_U32 " -r " F_U32 "-" F_U32 "\n", hashBeg, hashEnd, refBeg, refEnd);
+      else
+        fprintf(OPT, "-h " F_U32 "-" F_U32 " -r " F_U32 "-" F_U32 " --hashdatalen " F_U64 "\n", hashBeg, hashEnd, refBeg, refEnd, hashBases);
+
+      fprintf(stderr, "%5" F_U32P " %10" F_U32P "-%-10" F_U32P " %9" F_U32P " %12" F_U64P "  %10" F_U32P "-%-10" F_U32P " %9" F_U32P " %12" F_U64P "\n", jobName, hashBeg, hashEnd, hashReads, hashBases, refBeg, refEnd, refReads, refBases);
+
+      //  Move to the next.
+
+      batchSize++;
+
+      if (batchSize >= batchMax) {
+        batchSize = 0;
+        batchName++;
+      }
+
+      jobName++;
 
       refBeg = refEnd + 1;
     }
@@ -331,8 +318,8 @@ renameToFinal(char *prefix, char *type) {
 
 int
 main(int argc, char **argv) {
-  char            *gkpStoreName        = NULL;
-  gkStore         *gkpStore            = NULL;
+  char            *seqStoreName        = NULL;
+  sqStore         *seqStore            = NULL;
 
   char            *outputPrefix        = NULL;
   char             outputName[FILENAME_MAX];
@@ -352,8 +339,8 @@ main(int argc, char **argv) {
   int arg = 1;
   int err = 0;
   while (arg < argc) {
-    if        (strcmp(argv[arg], "-G") == 0) {
-      gkpStoreName = argv[++arg];
+    if        (strcmp(argv[arg], "-S") == 0) {
+      seqStoreName = argv[++arg];
 
     } else if (strcmp(argv[arg], "-hl") == 0) {
       ovlHashBlockLength = strtouint64(argv[++arg]);
@@ -365,10 +352,10 @@ main(int argc, char **argv) {
       minOverlapLength   = strtouint32(argv[++arg]);
 
     } else if (strcmp(argv[arg], "-H") == 0) {
-      AS_UTL_decodeRange(argv[++arg], libToHash);
+      decodeRange(argv[++arg], libToHash);
 
     } else if (strcmp(argv[arg], "-R") == 0) {
-      AS_UTL_decodeRange(argv[++arg], libToRef);
+      decodeRange(argv[++arg], libToRef);
 
     } else if (strcmp(argv[arg], "-C") == 0) {
        checkAllLibUsed = false;
@@ -390,8 +377,8 @@ main(int argc, char **argv) {
   if (ovlRefBlockLength == 0)
     fprintf(stderr, "ERROR:  Reference length (-rl) must be specified.\n"), err++;
 
-  if (gkpStoreName == NULL)
-    fprintf(stderr, "ERROR:  gkpStore (-G) must be supplied.\n"), err++;
+  if (seqStoreName == NULL)
+    fprintf(stderr, "ERROR:  seqStore (-S) must be supplied.\n"), err++;
 
   if (err) {
     fprintf(stderr, "usage: %s [opts]\n", argv[0]);
@@ -406,19 +393,19 @@ main(int argc, char **argv) {
   fprintf(stderr, "  read stream:  %12" F_U64P " bases.\n",  ovlRefBlockLength);
   fprintf(stderr, "\n");
 
-  gkStore   *gkp         = gkStore::gkStore_open(gkpStoreName);
-  uint32     numLibs     = gkp->gkStore_getNumLibraries();
+  sqStore   *seq         = sqStore::sqStore_open(seqStoreName);
+  uint32     numLibs     = seq->sqStore_getNumLibraries();
   uint32     invalidLibs = 0;
 
   for (set<uint32>::iterator it=libToHash.begin(); it != libToHash.end(); it++)
     if (numLibs < *it)
       fprintf(stderr, "ERROR: -H " F_U32 " is invalid; only " F_U32 " libraries in '%s'\n",
-              *it, numLibs, gkpStoreName), invalidLibs++;
+              *it, numLibs, seqStoreName), invalidLibs++;
 
   for (set<uint32>::iterator it=libToRef.begin(); it != libToRef.end(); it++)
     if (numLibs < *it)
       fprintf(stderr, "ERROR: -R " F_U32 " is invalid; only " F_U32 " libraries in '%s'\n",
-              *it, numLibs, gkpStoreName), invalidLibs++;
+              *it, numLibs, seqStoreName), invalidLibs++;
 
   if ((libToHash.size() > 0) && (libToRef.size() > 0)) {
     for (uint32 lib=1; lib<=numLibs; lib++) {
@@ -444,7 +431,7 @@ main(int argc, char **argv) {
   uint32  refMin  = 1;
   uint32  refMax  = UINT32_MAX;
 
-  uint32 *readLen = loadReadLengths(gkp, libToHash, hashMin, hashMax, libToRef, refMin, refMax);
+  uint32 *readLen = loadReadLengths(seq, libToHash, hashMin, hashMax, libToRef, refMin, refMax);
 
   FILE *BAT = openOutput(outputPrefix, "ovlbat");
   FILE *JOB = openOutput(outputPrefix, "ovljob");
@@ -453,7 +440,7 @@ main(int argc, char **argv) {
   fprintf(stderr, "  Job       Hash Range        # Reads      # Bases      Stream Range        # Reads      # Bases\n");
   fprintf(stderr, "----- --------------------- --------- ------------  --------------------- --------- ------------\n");
 
-  partitionLength(gkp, readLen, BAT, JOB, OPT, minOverlapLength, ovlHashBlockLength, ovlRefBlockLength, libToHash, hashMin, hashMax, libToRef, refMin, refMax);
+  partitionLength(seq, readLen, BAT, JOB, OPT, minOverlapLength, ovlHashBlockLength, ovlRefBlockLength, libToHash, hashMin, hashMax, libToRef, refMin, refMax);
 
   AS_UTL_closeFile(BAT);
   AS_UTL_closeFile(JOB);
@@ -465,7 +452,7 @@ main(int argc, char **argv) {
   renameToFinal(outputPrefix, "ovljob");
   renameToFinal(outputPrefix, "ovlopt");
 
-  gkp->gkStore_close();
+  seq->sqStore_close();
 
   exit(0);
 }

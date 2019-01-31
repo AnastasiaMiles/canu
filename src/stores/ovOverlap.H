@@ -19,7 +19,15 @@
  *
  *  Modifications by:
  *
- *    Brian P. Walenz beginning on 2016-OCT-24
+ *    Brian P. Walenz from 2014-DEC-09 to 2015-JUL-01
+ *      are Copyright 2014-2015 Battelle National Biodefense Institute, and
+ *      are subject to the BSD 3-Clause License
+ *
+ *    Brian P. Walenz beginning on 2015-OCT-12
+ *      are a 'United States Government Work', and
+ *      are released in the public domain
+ *
+ *    Sergey Koren beginning on 2016-MAR-11
  *      are a 'United States Government Work', and
  *      are released in the public domain
  *
@@ -29,6 +37,8 @@
 
 #ifndef AS_OVOVERLAP_H
 #define AS_OVOVERLAP_H
+
+#include "strings.H"
 
 
 //  Error rates are encoded as a 12-bit fixed-point value.  This gives us up to 40.95% error, with
@@ -163,9 +173,8 @@ public:
 enum ovOverlapDisplayType {
   ovOverlapAsHangs      = 0,  //  Show a and b hang
   ovOverlapAsCoords     = 1,  //  Show bgn,end for each read
-  ovOverlapAsRaw        = 2,  //  Show all four hangs
-  ovOverlapAsCompat     = 3,  //  Show in a format more-or-less compatible with CA 8.3
-  ovOverlapAsPaf        = 4,  //  Show in a format compatible with miniasm
+  ovOverlapAsUnaligned  = 2,  //  Show all four hangs, the unaligned bits on the end of each read
+  ovOverlapAsPaf        = 3,  //  Show in a format compatible with miniasm
 };
 
 
@@ -179,8 +188,8 @@ private:
   };
 
 public:
-  ovOverlap(gkStore *gkp) {
-    g = gkp;
+  ovOverlap(sqStore *seq) {
+    g = seq;
     clear();
   };
 
@@ -188,11 +197,11 @@ public:
   };
 
   static
-  ovOverlap  *allocateOverlaps(gkStore *gkp, uint64 num) {
+  ovOverlap  *allocateOverlaps(sqStore *seq, uint64 num) {
     ovOverlap *r = new ovOverlap [num];
 
     for (uint32 ii=0; ii<num; ii++)
-      r[ii].g = gkp;
+      r[ii].g = seq;
 
     return(r);
   };
@@ -232,14 +241,14 @@ public:
 
   //  These return the actual coordinates on the read.  For reverse B reads, the coordinates are in the reverse-complemented
   //  sequence, and are returned as bgn > end to show this.
-  uint32     a_bgn(void) const          { return(dat.ovl.ahg5); };
-  uint32     a_end(void) const          { return(g->gkStore_getRead(a_iid)->gkRead_sequenceLength() - dat.ovl.ahg3); };
+  uint32     a_bgn(sqRead_version v=sqRead_defaultVersion) const          { return(dat.ovl.ahg5); };
+  uint32     a_end(sqRead_version v=sqRead_defaultVersion) const          { return(g->sqStore_getRead(a_iid)->sqRead_sequenceLength(v) - dat.ovl.ahg3); };
 
-  uint32     b_bgn(void) const          { return((dat.ovl.flipped) ? (g->gkStore_getRead(b_iid)->gkRead_sequenceLength() - dat.ovl.bhg5) : (dat.ovl.bhg5)); };
-  uint32     b_end(void) const          { return((dat.ovl.flipped) ? (dat.ovl.bhg3) : (g->gkStore_getRead(b_iid)->gkRead_sequenceLength() - dat.ovl.bhg3)); };
+  uint32     b_bgn(sqRead_version v=sqRead_defaultVersion) const          { return((dat.ovl.flipped) ? (g->sqStore_getRead(b_iid)->sqRead_sequenceLength(v) - dat.ovl.bhg5) : (dat.ovl.bhg5)); };
+  uint32     b_end(sqRead_version v=sqRead_defaultVersion) const          { return((dat.ovl.flipped) ? (dat.ovl.bhg3) : (g->sqStore_getRead(b_iid)->sqRead_sequenceLength(v) - dat.ovl.bhg3)); };
 
-  uint32     a_len(void) const          { return(g->gkStore_getRead(a_iid)->gkRead_sequenceLength() - dat.ovl.ahg3 - dat.ovl.ahg5); };
-  uint32     b_len(void) const          { return(g->gkStore_getRead(b_iid)->gkRead_sequenceLength() - dat.ovl.bhg3 - dat.ovl.bhg5); };
+  uint32     a_len(sqRead_version v=sqRead_defaultVersion) const          { return(g->sqStore_getRead(a_iid)->sqRead_sequenceLength(v) - dat.ovl.ahg3 - dat.ovl.ahg5); };
+  uint32     b_len(sqRead_version v=sqRead_defaultVersion) const          { return(g->sqStore_getRead(b_iid)->sqRead_sequenceLength(v) - dat.ovl.bhg3 - dat.ovl.bhg5); };
 
   uint32     span(void) const           { return(dat.ovl.span); };
   void       span(uint32 s)             { dat.ovl.span = s; };
@@ -303,18 +312,19 @@ public:
   //  implicit conversion to floating point; lengths over 131072 will overflow a 32-bit signed
   //  integer before the division.
 
-  uint16     overlapScore(bool forB=false) const {
+  uint16     overlapScore(bool forB=false, sqRead_version v=sqRead_defaultVersion) const {
     return((forB == false) ?
-           (uint16)floor(16384.0 * identity() * a_len() / g->gkStore_getRead(a_iid)->gkRead_sequenceLength()) :
-           (uint16)floor(16384.0 * identity() * b_len() / g->gkStore_getRead(b_iid)->gkRead_sequenceLength()));
+           (uint16)floor(16384.0 * identity() * a_len() / g->sqStore_getRead(a_iid)->sqRead_sequenceLength(v)) :
+           (uint16)floor(16384.0 * identity() * b_len() / g->sqStore_getRead(b_iid)->sqRead_sequenceLength(v)));
   };
 
   char      *toString(char *str, ovOverlapDisplayType type, bool newLine);
+  bool       fromString(splitToWords &W, ovOverlapDisplayType type);
 
   void       swapIDs(ovOverlap const &orig);
 
   void       clear(void) {
-    //g        = NULL;    //  Explicitly DO NOT clear the pointer to gkpStore.
+    //g        = NULL;    //  Explicitly DO NOT clear the pointer to seqStore.
 
     for (uint32 ii=0; ii<ovOverlapNWORDS; ii++)
       dat.dat[ii] = 0;
@@ -339,7 +349,8 @@ public:
   };
 
 public:
-  gkStore             *g;
+  static
+  sqStore             *g;
 
 public:
   uint32               a_iid;
@@ -350,6 +361,14 @@ public:
     ovOverlapDAT      ovl;
   } dat;
 };
+
+
+//  This is the size of the datastructure that we're using to store overlaps for sorting.
+//  At present, with ovOverlap, it is over-allocating a pointer that we don't need, but
+//  to make a custom structure, we'd need to duplicate a bunch of code or copy data after
+//  loading and before writing.
+//
+#define ovOverlapSortSize  (sizeof(ovOverlap))
 
 
 #endif  //  AS_OVOVERLAP_H

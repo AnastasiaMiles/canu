@@ -38,10 +38,8 @@
 #include "AS_global.H"
 #include "canu_version.H"
 
-#include "AS_UTL_stackTrace.H"
-#include "AS_UTL_fileIO.H"
-
-#include "timeAndSize.H"
+#include "files.H"
+#include "system.H"
 
 #ifdef X86_GCC_LINUX
 #include <fpu_control.h>

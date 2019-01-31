@@ -33,7 +33,7 @@
 
 #include "AS_global.H"
 #include "ovStore.H"
-#include "splitToWords.H"
+#include "strings.H"
 
 #include <vector>
 
@@ -43,7 +43,7 @@ using namespace std;
 int
 main(int argc, char **argv) {
   char           *outName     = NULL;
-  char           *gkpName     = NULL;
+  char           *seqName     = NULL;
 
   vector<char *>  files;
 
@@ -54,10 +54,10 @@ main(int argc, char **argv) {
     if        (strcmp(argv[arg], "-o") == 0) {
       outName = argv[++arg];
 
-    } else if (strcmp(argv[arg], "-G") == 0) {
-      gkpName = argv[++arg];
+    } else if (strcmp(argv[arg], "-S") == 0) {
+      seqName = argv[++arg];
 
-    } else if (AS_UTL_fileExists(argv[arg])) {
+    } else if (fileExists(argv[arg])) {
       files.push_back(argv[arg]);
 
     } else {
@@ -68,12 +68,12 @@ main(int argc, char **argv) {
     arg++;
   }
 
-  if ((err) || (gkpName == NULL) || (outName == NULL) || (files.size() == 0)) {
-    fprintf(stderr, "usage: %s -G gkpStore -o output.ovb input.mhap[.gz]\n", argv[0]);
+  if ((err) || (seqName == NULL) || (outName == NULL) || (files.size() == 0)) {
+    fprintf(stderr, "usage: %s -S seqStore -o output.ovb input.mhap[.gz]\n", argv[0]);
     fprintf(stderr, "  Converts mhap native output to ovb\n");
 
-    if (gkpName == NULL)
-      fprintf(stderr, "ERROR:  no gkpStore (-G) supplied\n");
+    if (seqName == NULL)
+      fprintf(stderr, "ERROR:  no seqStore (-S) supplied\n");
     if (files.size() == 0)
       fprintf(stderr, "ERROR:  no overlap files supplied\n");
 
@@ -82,9 +82,9 @@ main(int argc, char **argv) {
 
   char       *ovStr = new char [1024];
 
-  gkStore    *gkpStore = gkStore::gkStore_open(gkpName);
-  ovOverlap   ov(gkpStore);
-  ovFile     *of = new ovFile(NULL, outName, ovFileFullWrite);
+  sqStore    *seqStore = sqStore::sqStore_open(seqName);
+  ovOverlap   ov(seqStore);
+  ovFile     *of = new ovFile(seqStore, outName, ovFileFullWrite);
 
 
   for (uint32 ff=0; ff<files.size(); ff++) {
@@ -115,26 +115,26 @@ main(int argc, char **argv) {
 
       assert(W[4][0] == '0');   //  first read is always forward
 
-      assert(W(5)  <  W(6));    //  first read bgn < end
-      assert(W(6)  <= W(7));    //  first read end <= len
+      assert(W.toint32(5)  <  W.toint32(6));    //  first read bgn < end
+      assert(W.toint32(6)  <= W.toint32(7));    //  first read end <= len
 
-      assert(W(9)  <  W(10));   //  second read bgn < end
-      assert(W(10) <= W(11));   //  second read end <= len
+      assert(W.toint32(9)  <  W.toint32(10));   //  second read bgn < end
+      assert(W.toint32(10) <= W.toint32(11));   //  second read end <= len
 
       ov.dat.ovl.forUTG = true;
       ov.dat.ovl.forOBT = true;
       ov.dat.ovl.forDUP = true;
 
-      ov.dat.ovl.ahg5 = W(5);
-      ov.dat.ovl.ahg3 = W(7) - W(6);
+      ov.dat.ovl.ahg5 = W.toint32(5);
+      ov.dat.ovl.ahg3 = W.toint32(7) - W.toint32(6);
 
       if (W[8][0] == '0') {
-        ov.dat.ovl.bhg5 = W(9);
-        ov.dat.ovl.bhg3 = W(11) - W(10);
+        ov.dat.ovl.bhg5 = W.toint32(9);
+        ov.dat.ovl.bhg3 = W.toint32(11) - W.toint32(10);
         ov.flipped(false);
       } else {
-        ov.dat.ovl.bhg5 = W(11) - W(10);
-        ov.dat.ovl.bhg3 = W(9);
+        ov.dat.ovl.bhg5 = W.toint32(11) - W.toint32(10);
+        ov.dat.ovl.bhg3 = W.toint32(9);
         ov.flipped(true);
       }
 
@@ -142,20 +142,20 @@ main(int argc, char **argv) {
 
       //  Check the overlap - the hangs must be less than the read length.
 
-      uint32  alen = gkpStore->gkStore_getRead( ov.a_iid )->gkRead_sequenceLength();
-      uint32  blen = gkpStore->gkStore_getRead( ov.b_iid )->gkRead_sequenceLength();
+      uint32  alen = seqStore->sqStore_getRead( ov.a_iid )->sqRead_sequenceLength();
+      uint32  blen = seqStore->sqStore_getRead( ov.b_iid )->sqRead_sequenceLength();
 
-      if ((alen != W(7)) ||
-          (blen != W(11)))
-        fprintf(stderr, "%s\nINVALID LENGTHS read " F_U32 " (len %d) and read " F_U32 " (len %d) lengths " F_S64 " and " F_S64 "\n",
+      if ((alen != W.toint32(7)) ||
+          (blen != W.toint32(11)))
+        fprintf(stderr, "%s\nINVALID LENGTHS read " F_U32 " (len %d) and read " F_U32 " (len %d) lengths " F_S32 " and " F_S32 "\n",
                 ovStr,
                 ov.a_iid, alen,
                 ov.b_iid, blen,
-                W(7), W(11)), exit(1);
+                W.toint32(7), W.toint32(11)), exit(1);
 
       if ((alen < ov.dat.ovl.ahg5 + ov.dat.ovl.ahg3) ||
           (blen < ov.dat.ovl.bhg5 + ov.dat.ovl.bhg3))
-        fprintf(stderr, "%s\nINVALID OVERLAP read " F_U32 " (len %d) and read " F_U32 " (len %d) hangs " F_U64 "/" F_U64 " and " F_U64 "/" F_U64 "%s\n",
+        fprintf(stderr, "%s\nINVALID OVERLAP read " F_U32 " (len %d) and read " F_U32 " (len %d) hangs " F_OV "/" F_OV " and " F_OV "/" F_OV "%s\n",
                 ovStr,
                 ov.a_iid, alen,
                 ov.b_iid, blen,
@@ -176,7 +176,7 @@ main(int argc, char **argv) {
   delete    of;
   delete [] ovStr;
 
-  gkpStore->gkStore_close();
+  seqStore->sqStore_close();
 
   exit(0);
 }

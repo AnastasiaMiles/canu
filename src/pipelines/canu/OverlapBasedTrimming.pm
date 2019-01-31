@@ -43,13 +43,18 @@ require Exporter;
 @EXPORT = qw(qualTrimReads dedupeReads trimReads splitReads loadTrimmedReads dumpTrimmedReads);
 
 use strict;
+use warnings "all";
+no  warnings "uninitialized";
 
 use File::Path 2.08 qw(make_path remove_tree);
 
 use canu::Defaults;
 use canu::Execution;
-use canu::Gatekeeper;
+
+use canu::SequenceStore;
 use canu::Report;
+use canu::Output;
+
 use canu::Grid_Cloud;
 
 
@@ -59,18 +64,17 @@ sub trimReads ($) {
     my $cmd;
     my $path   = "trimming/3-overlapbasedtrimming";
 
-    goto allDone   if (skipStage($asm, "obt-trimReads") == 1);
     goto allDone   if (fileExists("trimming/3-overlapbasedtrimming/$asm.1.trimReads.clear"));
 
     make_path($path)  if (! -d $path);
 
-    fetchStore("./trimming/$asm.ovlStore");
+    fetchOvlStore($asm, "trimming");
 
     #  Previously, we'd pick the error rate used by unitigger.  Now, we don't know unitigger here,
     #  and require an obt specific error rate.
 
     $cmd  = "$bin/trimReads \\\n";
-    $cmd .= "  -G  ../$asm.gkpStore \\\n";
+    $cmd .= "  -S  ../../$asm.seqStore \\\n";
     $cmd .= "  -O  ../$asm.ovlStore \\\n";
     $cmd .= "  -Co ./$asm.1.trimReads.clear \\\n";
     $cmd .= "  -e  " . getGlobal("obtErrorRate") . " \\\n";
@@ -104,8 +108,8 @@ sub trimReads ($) {
 
 
     if (0) {
-        $cmd  = "$bin/gatekeeperDumpFASTQ \\\n";
-        $cmd .= "  -G ../$asm.gkpStore \\\n";
+        $cmd  = "$bin/sqStoreDumpFASTQ \\\n";
+        $cmd .= "  -S ../../$asm.seqStore \\\n";
         $cmd .= "  -c ./$asm.1.trimReads.clear \\\n";
         $cmd .= "  -o ./$asm.1.trimReads.trimmed \\\n";
         $cmd .= ">    ./$asm.1.trimReads.trimmed.err 2>&1";
@@ -116,7 +120,8 @@ sub trimReads ($) {
     }
 
   finishStage:
-    emitStage($asm, "obt-trimReads");
+    generateReport($asm);
+    resetIteration("obt-trimReads");
 
   allDone:
 }
@@ -129,12 +134,12 @@ sub splitReads ($) {
     my $cmd;
     my $path   = "trimming/3-overlapbasedtrimming";
 
-    goto allDone   if (skipStage($asm, "obt-splitReads") == 1);
     goto allDone   if (fileExists("trimming/3-overlapbasedtrimming/$asm.2.splitReads.clear"));
 
     make_path($path)  if (! -d $path);
 
-    fetchStore("./trimming/$asm.ovlStore");
+    fetchOvlStore($asm, "trimming");
+
     fetchFile("./trimming/3-overlapbasedtrimming/$asm.1.trimReads.clear");
 
     my $erate  = getGlobal("obtErrorRate");  #  Was this historically
@@ -142,7 +147,7 @@ sub splitReads ($) {
     #$cmd .= "  -mininniepair 0 -minoverhanging 0 \\\n" if (getGlobal("doChimeraDetection") eq "aggressive");
 
     $cmd  = "$bin/splitReads \\\n";
-    $cmd .= "  -G  ../$asm.gkpStore \\\n";
+    $cmd .= "  -S  ../../$asm.seqStore \\\n";
     $cmd .= "  -O  ../$asm.ovlStore \\\n";
     $cmd .= "  -Ci ./$asm.1.trimReads.clear \\\n"       if (-e "trimming/3-overlapbasedtrimming/$asm.1.trimReads.clear");
     #$cmd .= "  -Cm ./$asm.max.clear \\\n"               if (-e "trimming/3-overlapbasedtrimming/$asm.max.clear");
@@ -174,8 +179,8 @@ sub splitReads ($) {
     addToReport("splitting", $report);
 
     if (0) {
-        $cmd  = "$bin/gatekeeperDumpFASTQ \\\n";
-        $cmd .= "  -G ../$asm.gkpStore \\\n";
+        $cmd  = "$bin/sqStoreDumpFASTQ \\\n";
+        $cmd .= "  -S ../../$asm.seqStore \\\n";
         $cmd .= "  -c ./$asm.2.splitReads.clear \\\n";
         $cmd .= "  -o ./$asm.2.splitReads.trimmed \\\n";
         $cmd .= ">    ./$asm.2.splitReads.trimmed.err 2>&1";
@@ -186,7 +191,8 @@ sub splitReads ($) {
     }
 
   finishStage:
-    emitStage($asm, "obt-splitReads");
+    generateReport($asm);
+    resetIteration("obt-splitReads");
 
   allDone:
 }
@@ -200,8 +206,7 @@ sub loadTrimmedReads ($) {
     my $path   = "trimming/3-overlapbasedtrimming";
     my $inp;
 
-    goto allDone   if (skipStage($asm, "obt-dumpReads") == 1);
-    goto allDone   if (getNumberOfBasesInStore("utg", $asm) > 0);
+    goto allDone   if (getNumberOfBasesInStore($asm, "utg") > 0);
 
     make_path($path)  if (! -d $path);
 
@@ -214,23 +219,27 @@ sub loadTrimmedReads ($) {
     caFailure("loading trimmed reads failed; no 'clear' input", "trimming/$asm.trimmedReads.err")  if (!defined($inp));
 
     $cmd  = "$bin/loadTrimmedReads \\\n";
-    $cmd .= "  -G ../$asm.gkpStore \\\n";
+    $cmd .= "  -S ../../$asm.seqStore \\\n";
     $cmd .= "  -c $inp \\\n";
     $cmd .= "> ./$asm.loadtrimmedReads.err 2>&1";
 
     if (runCommand($path, $cmd)) {
-        caFailure("loading clear ranges failed", "./$asm.trimmedReads.err");
+        caFailure("loading clear ranges failed", "$path/$asm.loadTrimmedReads.err");
     }
 
-    unlink("./$asm.trimmedReads.err");
+    unlink("$path/$asm.trimmedReads.err");
+
+    #  Save results.
+
+    stashSeqStore($asm);
 
     #  Report reads.
 
-    addToReport("utgGkpStore", generateReadLengthHistogram("utg", $asm));
+    addToReport("utgSeqStore", generateReadLengthHistogram("utg", $asm));
 
     #stashFile("./$asm.trimmedReads.fasta.gz");
 
-    if (getGlobal("saveOverlaps") eq "1") {
+    if (getGlobal("saveOverlaps") eq "0") {
         print STDERR "--\n";
         print STDERR "-- Purging overlaps used for trimming.\n";
 
@@ -241,10 +250,10 @@ sub loadTrimmedReads ($) {
     }
 
   finishStage:
-    emitStage($asm, "obt-dumpReads");
+    generateReport($asm);
+    resetIteration("obt-dumpReads");
 
   allDone:
-    stopAfter("readTrimming");
 }
 
 
@@ -254,31 +263,69 @@ sub dumpTrimmedReads ($) {
     my $bin     = getBinDirectory();
     my $cmd;
 
-    goto allDone   if (skipStage($asm, "obt-dumpTrimmedReads") == 1);
-    goto allDone   if (sequenceFileExists("$asm.trimmedReads"));
+    goto allDone   if (fileExists("$asm.trimmedReads.fasta.gz"));
+    goto allDone   if (fileExists("$asm.trimmedReads.fastq.gz"));
     goto allDone   if (getGlobal("saveReads") == 0);
-    return         if (! -d "trimming/$asm.gkpStore");  #  No trimming done, nothing to do.
 
-    $cmd  = "$bin/gatekeeperDumpFASTQ \\\n";
-    $cmd .= "  -trimmed \\\n";
-    $cmd .= "  -G ./$asm.gkpStore \\\n";
-    $cmd .= "  -o ./$asm.trimmedReads.gz \\\n";
-    $cmd .= "  -fasta \\\n";
-    $cmd .= "  -nolibname \\\n";
-    $cmd .= "> ./$asm.trimmedReads.fasta.err 2>&1";
+    #  We need to skip this entire function if trimmed reads were not computed.
+    #  Otherwise, we incorrectly declare that all reads were trimmed out
+    #  and halt the assembly.
+    #
+    #  In cloud mode, we dump reads right after loading them, and to load them,
+    #  the 3-overlapbasedtrimming directory must exist, so we use that to decide if trimming
+    #  was attempted.
 
-    if (runCommand(".", $cmd)) {
-        caExit("failed to output trimmed reads", "./$asm.trimmedReads.fasta.err");
+    return         if (! -d "trimming/3-overlapbasedtrimming");
+
+    #  If no trimmed reads exist, don't bother trying to dump them.
+
+    if (getNumberOfReadsInStore($asm, "utg") > 0) {
+        $cmd  = "$bin/sqStoreDumpFASTQ \\\n";
+        $cmd .= "  -trimmed \\\n";
+        $cmd .= "  -S ./$asm.seqStore \\\n";
+        $cmd .= "  -o ./$asm.trimmedReads.gz \\\n";
+        $cmd .= "  -fasta \\\n";
+        $cmd .= "  -nolibname \\\n";
+        $cmd .= "> ./$asm.trimmedReads.fasta.err 2>&1";
+
+        if (runCommand(".", $cmd)) {
+            caExit("failed to output trimmed reads", "./$asm.trimmedReads.fasta.err");
+        }
+
+        unlink "./$asm.trimmedReads.fasta.err";
+
+        stashFile("$asm.trimmedReads.fasta.gz");
     }
 
-    unlink "./$asm.trimmedReads.fasta.err";
+    #  If the trimmed reads file exists, report so.
+    #  Otherwise, report no trimmed reads, and generate fake outputs so we terminate.
 
-    print STDERR "--\n";
-    print STDERR "-- Trimmed reads saved in '", sequenceFileExists("$asm.trimmedReads"), "'.\n";
+    my $out;
+
+    $out = "$asm.trimmedReads.fasta.gz"   if (fileExists("$asm.trimmedReads.fasta.gz"));
+    $out = "$asm.trimmedReads.fastq.gz"   if (fileExists("$asm.trimmedReads.fastq.gz"));
+
+    if (defined($out)) {
+        print STDERR "--\n";
+        print STDERR "-- Trimmed reads saved in '$out'.\n";
+    } else {
+        print STDERR "--\n";
+        print STDERR "-- Yikes!  No trimmed reads generated!\n";
+        print STDERR "-- Can't proceed!\n";
+        print STDERR "--\n";
+        print STDERR "-- Generating empty outputs.\n";
+
+        runCommandSilently(".", "gzip -1vc < /dev/null > $asm.trimmedReads.gz   2> /dev/null", 0)   if (! -e "$asm.trimmedReads.gz");
+
+        stashFile("$asm.trimmedReads.fasta.gz");
+
+        generateOutputs($asm);
+    }
 
   finishStage:
-    emitStage($asm, "cor-dumpTrimmedReads");
+    generateReport($asm);
+    resetIteration("cor-dumpTrimmedReads");
 
   allDone:
-    stopAfter("readTrimming");
+    stopAfter("trimming");
 }

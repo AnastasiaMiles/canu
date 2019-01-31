@@ -29,7 +29,7 @@
 
 #include "AS_global.H"
 #include "ovStore.H"
-#include "splitToWords.H"
+#include "strings.H"
 
 #include <vector>
 
@@ -38,10 +38,10 @@ using namespace std;
 int
 main(int argc, char **argv) {
   char           *outName  = NULL;
-  char           *gkpName  = NULL;
+  char           *seqName  = NULL;
   bool		  partialOverlaps = false;
   uint32          minOverlapLength = 0;
-  uint32          tolerance = 0;
+  double          erate = 0;
 
   vector<char *>  files;
 
@@ -51,19 +51,19 @@ main(int argc, char **argv) {
     if        (strcmp(argv[arg], "-o") == 0) {
       outName = argv[++arg];
 
-    } else if (strcmp(argv[arg], "-G") == 0) {
-      gkpName = argv[++arg];
-
-    } else if (strcmp(argv[arg], "-tolerance") == 0) {
-      tolerance = atoi(argv[++arg]);;
+    } else if (strcmp(argv[arg], "-S") == 0) {
+      seqName = argv[++arg];
 
     } else if (strcmp(argv[arg], "-partial") == 0) {
       partialOverlaps = true;
 
+   } else if (strcmp(argv[arg], "-e") == 0) {
+      erate = atof(argv[++arg]);
+
     } else if (strcmp(argv[arg], "-len") == 0) {
       minOverlapLength = atoi(argv[++arg]);
 
-    } else if (AS_UTL_fileExists(argv[arg])) {
+    } else if (fileExists(argv[arg])) {
       files.push_back(argv[arg]);
 
     } else {
@@ -74,7 +74,7 @@ main(int argc, char **argv) {
     arg++;
   }
 
-  if ((err) || (gkpName == NULL) || (outName == NULL) || (files.size() == 0)) {
+  if ((err) || (seqName == NULL) || (outName == NULL) || (files.size() == 0)) {
     fprintf(stderr, "usage: %s [options] file.mhap[.gz]\n", argv[0]);
     fprintf(stderr, "\n");
     fprintf(stderr, "  Converts mhap native output to ovb\n");
@@ -82,8 +82,8 @@ main(int argc, char **argv) {
     fprintf(stderr, "  -o out.ovb     output file\n");
     fprintf(stderr, "\n");
 
-    if (gkpName == NULL)
-      fprintf(stderr, "ERROR:  no gkpStore (-G) supplied\n");
+    if (seqName == NULL)
+      fprintf(stderr, "ERROR:  no seqStore (-S) supplied\n");
     if (files.size() == 0)
       fprintf(stderr, "ERROR:  no overlap files supplied\n");
 
@@ -92,18 +92,18 @@ main(int argc, char **argv) {
 
   char        *ovStr = new char [1024*1024];
 
-  gkStore    *gkpStore = gkStore::gkStore_open(gkpName);
-  ovOverlap   ov(gkpStore);
-  ovFile      *of = new ovFile(NULL, outName, ovFileFullWrite);
+  sqStore    *seqStore = sqStore::sqStore_open(seqName);
+  ovOverlap   ov(seqStore);
+  ovFile      *of = new ovFile(seqStore, outName, ovFileFullWrite);
 
   for (uint32 ff=0; ff<files.size(); ff++) {
     compressedFileReader  *in = new compressedFileReader(files[ff]);
 
     //  $1        $2     $3     $4     $5     $6         $7      $8    $9     $10      $11          $12        $13
     //  0         1      2      3      4      5          6       7     8      9        10           11         12
-    //  0f1bd7b6  8189   1310   8014   +      b74d9367   14205   7340  14051  277      6711         255        cm:i:32
-    //  0f1bd7b6  8189   1152   7272   -      a3026aca   7731    1642  7547   157      6120         255        cm:i:24
     //  aiid      alen   bgn    end    bori   biid       blen    bgn   end    #match   minimizers   alnlen     cm:i:errori
+    //  read1	5064	0	5060	+	read164	7384	138	5251	4763	5144	0	tp:A:S	cm:i:1410	s1:i:4754	dv:f:0.0142
+    //
 
     while (fgets(ovStr, 1024*1024, in->file()) != NULL) {
       splitToWords  W(ovStr);
@@ -114,70 +114,34 @@ main(int argc, char **argv) {
       if (ov.a_iid == ov.b_iid)
         continue;
 
-      ov.dat.ovl.ahg5 = W(2);
-      ov.dat.ovl.ahg3 = W(1) - W(3);
+      ov.dat.ovl.ahg5 = W.toint32(2);
+      ov.dat.ovl.ahg3 = W.toint32(1) - W.toint32(3);
 
       if (W[4][0] == '+') {
-        ov.dat.ovl.bhg5 = W(7);
-        ov.dat.ovl.bhg3 = W(6) - W(8);
+        ov.dat.ovl.bhg5 = W.toint32(7);
+        ov.dat.ovl.bhg3 = W.toint32(6) - W.toint32(8);
         ov.flipped(false);
       } else {
-        ov.dat.ovl.bhg3 = W(7);
-        ov.dat.ovl.bhg5 = W(6) - W(8);
+        ov.dat.ovl.bhg3 = W.toint32(7);
+        ov.dat.ovl.bhg5 = W.toint32(6) - W.toint32(8);
         ov.flipped(true);
       }
 
-      ov.erate(1-((double)W(9)/W(10)));
+      ov.erate((double)atof(W[15]+5));
 
       //  Check the overlap - the hangs must be less than the read length.
 
-      uint32  alen = gkpStore->gkStore_getRead(ov.a_iid)->gkRead_sequenceLength();
-      uint32  blen = gkpStore->gkStore_getRead(ov.b_iid)->gkRead_sequenceLength();
+      uint32  alen = seqStore->sqStore_getRead(ov.a_iid)->sqRead_sequenceLength();
+      uint32  blen = seqStore->sqStore_getRead(ov.b_iid)->sqRead_sequenceLength();
 
       if ((alen < ov.dat.ovl.ahg5 + ov.dat.ovl.ahg3) ||
-          (blen < ov.dat.ovl.bhg5 + ov.dat.ovl.bhg3)) {
-        fprintf(stderr, "INVALID OVERLAP " F_U32 " (len %6d) " F_U32 " (len %6d) hangs " F_U64 " " F_U64 " - " F_U64 " " F_U64 " flip " F_U64 "\n",
+          (blen < ov.dat.ovl.bhg5 + ov.dat.ovl.bhg3))
+        fprintf(stderr, "INVALID OVERLAP " F_U32 " (len %6d) " F_U32 " (len %6d) hangs " F_OV " " F_OV " - " F_OV " " F_OV "%s\n",
                 ov.a_iid, alen,
                 ov.b_iid, blen,
                 ov.dat.ovl.ahg5, ov.dat.ovl.ahg3,
                 ov.dat.ovl.bhg5, ov.dat.ovl.bhg3,
-                ov.dat.ovl.flipped);
-        exit(1);
-      }
-      if (!ov.overlapIsDovetail() && partialOverlaps == false) {
-         if (alen <= blen && ov.dat.ovl.ahg5 >= 0 && ov.dat.ovl.ahg3 >= 0 && ov.dat.ovl.bhg5 >= ov.dat.ovl.ahg5 && ov.dat.ovl.bhg3 >= ov.dat.ovl.ahg3 && ((ov.dat.ovl.ahg5 + ov.dat.ovl.ahg3)) < tolerance) {
-              ov.dat.ovl.bhg5 = max(0, ov.dat.ovl.bhg5 - ov.dat.ovl.ahg5); ov.dat.ovl.ahg5 = 0;
-              ov.dat.ovl.bhg3 = max(0, ov.dat.ovl.bhg3 - ov.dat.ovl.ahg3); ov.dat.ovl.ahg3 = 0;
-           }
-           // second is b contained (both b hangs can be extended)
-           //
-           else if (alen >= blen && ov.dat.ovl.bhg5 >= 0 && ov.dat.ovl.bhg3 >= 0 && ov.dat.ovl.ahg5 >= ov.dat.ovl.bhg5 && ov.dat.ovl.ahg3 >= ov.dat.ovl.bhg3 && ((ov.dat.ovl.bhg5 + ov.dat.ovl.bhg3)) < tolerance) {
-              ov.dat.ovl.ahg5 = max(0, ov.dat.ovl.ahg5 - ov.dat.ovl.bhg5); ov.dat.ovl.bhg5 = 0;
-              ov.dat.ovl.ahg3 = max(0, ov.dat.ovl.ahg3 - ov.dat.ovl.bhg3); ov.dat.ovl.bhg3 = 0;
-           }
-           // third is 5' dovetal  ---------->
-           //                          ---------->
-           //                          or
-           //                          <---------
-           //                         bhg5 here is always first overhang on b read
-           //
-           else if (ov.dat.ovl.ahg3 <= ov.dat.ovl.bhg3 && (ov.dat.ovl.ahg3 >= 0 && ((double)(ov.dat.ovl.ahg3)) < tolerance) &&
-                   (ov.dat.ovl.bhg5 >= 0 && ((double)(ov.dat.ovl.bhg5)) < tolerance)) {
-              ov.dat.ovl.ahg5 = max(0, ov.dat.ovl.ahg5 - ov.dat.ovl.bhg5); ov.dat.ovl.bhg5 = 0;
-              ov.dat.ovl.bhg3 = max(0, ov.dat.ovl.bhg3 - ov.dat.ovl.ahg3); ov.dat.ovl.ahg3 = 0;
-           }
-           //
-           // fourth is 3' dovetail    ---------->
-           //                     ---------->
-           //                     or
-           //                     <----------
-           //                     bhg5 is always first overhang on b read
-           else if (ov.dat.ovl.ahg5 <= ov.dat.ovl.bhg5 && (ov.dat.ovl.ahg5 >= 0 && ((double)(ov.dat.ovl.ahg5)) < tolerance) &&
-                   (ov.dat.ovl.bhg3 >= 0 && ((double)(ov.dat.ovl.bhg3)) < tolerance)) {
-              ov.dat.ovl.bhg5 = max(0, ov.dat.ovl.bhg5 - ov.dat.ovl.ahg5); ov.dat.ovl.ahg5 = 0;
-              ov.dat.ovl.ahg3 = max(0, ov.dat.ovl.ahg3 - ov.dat.ovl.bhg3); ov.dat.ovl.bhg3 = 0;
-           }
-     }
+                (ov.dat.ovl.flipped) ? " flipped" : ""), exit(1);
 
       ov.dat.ovl.forUTG = (partialOverlaps == false) && (ov.overlapIsDovetail() == true);;
       ov.dat.ovl.forOBT = partialOverlaps;
@@ -185,6 +149,10 @@ main(int argc, char **argv) {
 
       // check the length is big enough
       if (ov.a_end() - ov.a_bgn() < minOverlapLength || ov.b_end() - ov.b_bgn() < minOverlapLength) {
+         continue;
+      }
+      // check if the erate is OK
+      if (ov.erate() > erate) {
          continue;
       }
       //  Overlap looks good, write it!
@@ -198,7 +166,7 @@ main(int argc, char **argv) {
   delete    of;
   delete [] ovStr;
 
-  gkpStore->gkStore_close();
+  seqStore->sqStore_close();
 
   exit(0);
 }

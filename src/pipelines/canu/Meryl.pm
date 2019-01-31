@@ -40,21 +40,66 @@ package canu::Meryl;
 require Exporter;
 
 @ISA    = qw(Exporter);
-@EXPORT = qw(merylConfigure merylCheck merylProcess merylSubtract merylFinishSubtraction);
+@EXPORT = qw(merylConfigure merylCountCheck merylProcessCheck merylSubtract merylFinishSubtraction);
 
 use strict;
+use warnings "all";
+no  warnings "uninitialized";
 
 use File::Path 2.08 qw(make_path remove_tree);
 use File::Basename;
-use POSIX qw(ceil);
+use File::Copy;
+use POSIX qw(floor ceil);
 
 use canu::Defaults;
 use canu::Execution;
-use canu::Gatekeeper;
-use canu::ErrorEstimate;
+
+use canu::SequenceStore;
 use canu::Report;
+
 use canu::Grid_Cloud;
-use canu::HaplotypeReads qw(getHaplotypes);
+
+
+
+sub merylParameters ($$) {
+    my $asm    = shift @_;
+    my $tag    = shift @_;
+
+    my ($base, $path, $name, $merSize);
+
+    #  Find a place to run stuff.
+
+    $base = "haplotype"   if ($tag eq "hap");
+    $base = "correction"  if ($tag eq "cor");
+    $base = "trimming"    if ($tag eq "obt");
+    $base = "unitigging"  if ($tag eq "utg");
+
+    $path = "$base/0-mercounts";
+    $path = "$path-$asm"  if ($tag eq "hap");
+
+    #  Decide on which set of parameters we need to be using, and make output file names.
+
+    if (getGlobal("${tag}Overlapper") eq "ovl") {
+        $merSize = getGlobal("${tag}OvlMerSize");
+        $name    = "$asm.ms$merSize";
+
+    } elsif (getGlobal("${tag}Overlapper") eq "mhap") {
+        $merSize = getGlobal("${tag}mhapMerSize");
+        $name    = "$asm.ms$merSize";
+
+    } elsif (getGlobal("${tag}Overlapper") eq "minimap") {
+        $merSize = 0;
+        $name    = undef;
+
+    } else {
+        caFailure("unknown ${tag}Overlapper '" . getGlobal("${tag}Overlapper") . "'", undef);
+    }
+
+    #  Return all this goodness.  Well, there used to be a whole lot more stuff here, but
+    #  it was never used and/or obsoleted by meryl now dumping mhap more or less directly.
+
+    return($base, $path, $name, $merSize);
+}
 
 
 
@@ -63,92 +108,51 @@ sub merylGenerateHistogram ($$) {
     my $tag     = shift @_;
     my $hist;
 
-    #  We don't know $ofile from where merylGenerateHistogram is typically called (Report.pm)
-    #  and so we're forced to configure every time.
+    my ($base, $path, $name, $merSize) = merylParameters($asm, $tag);
 
-    my ($base, $path, $merSize, $merThresh, $merScale, $merDistinct, $merTotal, $ffile, $ofile) = merylParameters($asm, $tag);
+    fetchFile("$path/$name.histogram");
 
-    return(undef)   if (! -e "$path/$ofile.histogram");
-    return(undef)   if (! -e "$path/$ofile.histogram.info");
+    return(undef)   if (! -e "$path/$name.histogram");
 
-    #  Load the statistics
+    #  Load histogram data
 
     my $numTotal    = 0;
     my $numDistinct = 0;
     my $numUnique   = 0;
     my $largest     = 0;
 
-    open(F, "< $path/$ofile.histogram.info") or caFailure("can't open meryl histogram information file '$path/$ofile.histogram.info' for reading: $!\n", undef);
+    my $maxCount;
+    my @numDistinct;
+    my @fractDistinct;
+    my @fractTotal;
+
+    open(F, "< $path/$name.histogram");
     while (<F>) {
-        $numTotal    = $1   if (m/Found\s(\d+)\s+mers./);
-        $numDistinct = $1   if (m/Found\s(\d+)\s+distinct\smers./);
-        $numUnique   = $1   if (m/Found\s(\d+)\s+unique\smers./);
-        $largest     = $1   if (m/Largest\smercount\sis\s(\d+)/);
-    }
-    close(F);
+        s/^\s+//;
+        s/\s+$//;
 
-    #  Load histogram data
-
-    my @tc;  #  Total count
-    my @fu;  #  Fraction unique
-    my @ft;  #  Fraction total
-    my $mc;
-
-    open(F, "< $path/$ofile.histogram");
-    while (<F>) {
         my @v = split '\s+', $_;
-        $tc[$v[0]] = $v[1];
-        $fu[$v[0]] = $v[2];
-        $ft[$v[0]] = $v[3];
-        $mc        = $v[0];  #  histogram should be sorted
+
+        $numUnique   = $1   if (m/unique\s+(\d+)\s/);
+        $numDistinct = $1   if (m/distinct\s+(\d+)\s/);
+        $numTotal    = $1   if (m/present\s+(\d+)\s/);
+
+        if ($v[0] =~ m/^\d+$/) {
+            $maxCount             = $v[0];  #  maxCount is last count seen; histogram is sorted.
+            $numDistinct[$v[0]]   = $v[1];
+            $fractDistinct[$v[0]] = $v[2];
+            $fractTotal[$v[0]]    = $v[3];
+        }
     }
     close(F);
 
-    #  Prune the high-count kmers
-    #
-    #  In blocks of 40, extend the histogram until the average of the next block is nearly the same
-    #  as the average of this block.
-if (0) {
-    my $lo      = 2;
-    my $hi      = 3;
-    my $st      = 1;
-    my $aveLast = 0;
-    my $aveThis = 0;
+    #  Find blocks for the histogram.
 
-    for (my $ii=$lo; $ii<$hi; $ii++) {
-        $aveThis += $tc[$ii];
-    }
-    $aveThis /= ($hi - $lo);
-    $aveLast  = 0;
+    my @TD;  #  Total number of distinct kmers in the i'th histogram block.
+    my @FU;  #  Fraction distinct ...
+    my @FT;  #  Fraction total    ...
 
-    print STDERR "aveLast $aveLast aveThis $aveThis $lo $hi INITIAL\n";
-
-    while (($hi < $mc) &&
-           ($aveThis > 2) &&
-           (($aveThis < 0.90 * $aveLast) ||
-            ($aveLast < 0.90 * $aveThis))) {
-        $lo += $st;
-        $hi += $st;
-        $st += 1;
-
-        $aveLast = $aveThis;
-        $aveThis = 0;
-
-        for (my $ii=$lo; $ii<$hi; $ii++) {
-            $aveThis += $tc[$ii];
-        }
-        $aveThis /= ($hi - $lo);
-        print STDERR "aveLast $aveLast aveThis $aveThis $lo $hi\n";
-    }
-
-    print STDERR "aveLast $aveLast aveThis $aveThis $lo $hi FINAL\n";
-}
-
-    my @TC;
-    my @FU;
-    my @FT;
-
-    my $TCmax  = 0;
+    my $TDmax  = 0;   #  Max count of of any block, excluding the first (we ignore the tail of this block when drawing the histogram)
 
     my $lo = 1;
     my $hi = 2;
@@ -156,14 +160,14 @@ if (0) {
 
     for (my $ii=0; $ii <= 40; $ii++) {
         for (my $jj=$lo; $jj < $hi; $jj++) {
-            $TC[$ii] += $tc[$jj];                                      #  Sum the counts
+            $TD[$ii] += $numDistinct[$jj];                                                   #  Sum the number of distinct mers we've seen
 
-            $FU[$ii] = ($fu[$ii] < $FU[$ii]) ? $FU[$ii] : $fu[$jj];    #  But the fractions are already cumulative,
-            $FT[$ii] = ($ft[$ii] < $FT[$ii]) ? $FT[$ii] : $ft[$jj];    #  we just need to skip zeros.
+            $FU[$ii] = ($fractDistinct[$ii] < $FU[$ii]) ? $FU[$ii] : $fractDistinct[$jj];    #  But the fractions are already cumulative,
+            $FT[$ii] = ($fractTotal[$ii]    < $FT[$ii]) ? $FT[$ii] : $fractTotal[$jj];       #  we just need to skip zeros.
         }
 
         if ($ii > 0) {
-            $TCmax = ($TCmax < $TC[$ii]) ? $TC[$ii] : $TCmax;
+            $TDmax = ($TDmax < $TD[$ii]) ? $TD[$ii] : $TDmax;
         }
 
         $lo  = $hi;
@@ -171,8 +175,16 @@ if (0) {
         $st += 1;
     }
 
-    my $maxY   = $lo;
-    my $Xscale = $TCmax / 70;
+    if ($TDmax == 0) {           #  A pathological case; if all kmers are unique,
+        $TDmax = $TD[0];         #  no max size is set, Xscale is zero,
+    }                            #  and we fail.
+
+    my $maxY   = 1;              #  Last count to include in the histogram.
+    my $Xscale = $TDmax / 70;    #  Scale of each * in the histogram.
+
+    for (my $ii=0; $ii <= 40; $ii++) {
+        $maxY = $ii  if ($TD[$ii] > 0);
+    }
 
     #  Now just draw the histogram
 
@@ -185,21 +197,21 @@ if (0) {
     $st = 1;
 
     for (my $ii=0; $ii<=40; $ii++) {
-        my $numXs = int($TC[$ii] / $Xscale);
+        my $numXs = int($TD[$ii] / $Xscale);
 
         if ($numXs <= 70) {
             $hist .= sprintf("--  %6d-%6d %9d %s%s %.4f %.4f\n",
-                             $lo, $hi-1, $TC[$ii],
+                             $lo, $hi-1, $TD[$ii],
                              "*" x      ($numXs),
                              " " x (70 - $numXs), $FU[$ii], $FT[$ii]);
         } else {
             $hist .= sprintf("--  %6d-%6d %9d %s%s %.4f %.4f\n",
-                             $lo, $hi-1, $TC[$ii],
+                             $lo, $hi-1, $TD[$ii],
                              "*" x 67,
                              "-->", $FU[$ii], $FT[$ii]);
         }
 
-        last   if ($hi >= $maxY);
+        last   if ($ii >= $maxY);
 
         $lo  = $hi;
         $hi += $st;
@@ -217,157 +229,82 @@ if (0) {
 
 
 
-
-#  Threshold:  Three methods to pick it.
-#    Threshold  - 'auto', 'auto * X', 'auto / X', or an integer value
-#    Distinct   - by the fraction distinct retained
-#    Total      - by the fraction total retained
-
 sub merylPlotHistogram ($$$$) {
     my $path   = shift @_;
-    my $ofile  = shift @_;
-    my $suffix = shift @_;
+    my $asm    = shift @_;
+    my $name   = shift @_;
     my $size   = shift @_;  #  Size of image, not merSize!
 
-    return  if (fileExists("$path/$ofile.histogram.$suffix.gp"));
+    return  if (fileExists("$path/$name.histogram.gp"));
 
     my $gnuplot = getGlobal("gnuplot");
     my $format  = getGlobal("gnuplotImageFormat");
 
-    fetchFile("$path/$ofile.histogram");
+    if ($gnuplot) {
+        fetchFile("$path/$name.histogram");
 
-    open(F, "> $path/$ofile.histogram.$suffix.gp");
-    print F "\n";
-    print F "unset multiplot\n";
-    print F "\n";
-    print F "set terminal $format size $size,$size\n";
-    print F "set output '$ofile.histogram.$suffix.$format'\n";
-    print F "\n";
-    print F "set multiplot\n";
-    print F "\n";
-    print F "#  Distinct-vs-total full size plot\n";
-    print F "\n";
-    print F "set origin 0.0,0.0\n";
-    print F "set size   1.0,1.0\n";
-    print F "\n";
-    print F "set xrange [0.5:1.0]\n";
-    print F "set yrange [0.0:1.0]\n";
-    print F "\n";
-    print F "unset ytics\n";
-    print F "set y2tics 0.1\n";
-    #print F "set y2tics add ('0.6765' 0.6765)\n";
-    print F "\n";
-    print F "plot [0.5:1.0] '$ofile.histogram' using 3:4 with lines title 'Distinct-vs-Total'\n";
-    print F "\n";
-    print F "#  Distinct-vs-total zoom in lower left corner\n";
-    print F "\n";
-    print F "set origin 0.05,0.10\n";
-    print F "set size   0.40,0.40\n";
-    print F "\n";
-    print F "set xrange [0.975:1.0]\n";
-    print F "set yrange [0.4:0.80]\n";
-    print F "\n";
-    print F "unset ytics\n";     #  ytics on the left of the plot
-    print F "set y2tics 0.1\n";  #  y2tics on the right of the plot
-    #print F "set y2tics add ('0.6765' 0.6765)\n";
-    print F "\n";
-    print F "plot [0.975:1.0] '$ofile.histogram' using 3:4 with lines title 'Distinct-vs-Total'\n";
-    print F "\n";
-    print F "#  Histogram in upper left corner\n";
-    print F "\n";
-    print F "set origin 0.05,0.55\n";
-    print F "set size   0.40,0.40\n";
-    print F "\n";
-    print F "set xrange [0:200]\n";
-    print F "set yrange [0:30000000]\n";
-    print F "\n";
-    print F "unset ytics\n";      #  ytics on the left of the plot
-    print F "set y2tics 10e6\n";  #  y2tics on the right of the plot
-    print F "unset mytics\n";
-    print F "\n";
-    print F "plot [0:200] '$ofile.histogram' using 1:2 with lines title 'Histogram'\n";
-    close(F);
+        open(F, "> $path/$name.histogram.gp");
+        print F "\n";
+        print F "unset multiplot\n";
+        print F "\n";
+        print F "set terminal $format size $size,$size\n";
+        print F "set output '$name.histogram.$format'\n";
+        print F "\n";
+        print F "set multiplot\n";
+        print F "\n";
+        print F "#  Distinct-vs-total full size plot\n";
+        print F "\n";
+        print F "set origin 0.0,0.0\n";
+        print F "set size   1.0,1.0\n";
+        print F "\n";
+        print F "set xrange [0.5:1.0]\n";
+        print F "set yrange [0.0:1.0]\n";
+        print F "\n";
+        print F "unset ytics\n";
+        print F "set y2tics 0.1\n";
+        #print F "set y2tics add ('0.6765' 0.6765)\n";
+        print F "\n";
+        print F "plot [0.5:1.0] '$name.histogram' using 3:4 with lines title 'Distinct-vs-Total'\n";
+        print F "\n";
+        print F "#  Distinct-vs-total zoom in lower left corner\n";
+        print F "\n";
+        print F "set origin 0.05,0.10\n";
+        print F "set size   0.40,0.40\n";
+        print F "\n";
+        print F "set xrange [0.975:1.0]\n";
+        print F "set yrange [0.4:0.80]\n";
+        print F "\n";
+        print F "unset ytics\n";     #  ytics on the left of the plot
+        print F "set y2tics 0.1\n";  #  y2tics on the right of the plot
+        #print F "set y2tics add ('0.6765' 0.6765)\n";
+        print F "\n";
+        print F "plot [0.975:1.0] '$name.histogram' using 3:4 with lines title 'Distinct-vs-Total'\n";
+        print F "\n";
+        print F "#  Histogram in upper left corner\n";
+        print F "\n";
+        print F "set origin 0.05,0.55\n";
+        print F "set size   0.40,0.40\n";
+        print F "\n";
+        print F "set xrange [0:200]\n";
+        print F "set yrange [0:30000000]\n";
+        print F "\n";
+        print F "unset ytics\n";      #  ytics on the left of the plot
+        print F "set y2tics 10e6\n";  #  y2tics on the right of the plot
+        print F "unset mytics\n";
+        print F "\n";
+        print F "plot [0:200] '$name.histogram' using 1:2 with lines title 'Histogram'\n";
+        close(F);
 
-    if (runCommandSilently($path, "$gnuplot ./$ofile.histogram.$suffix.gp > /dev/null 2>&1", 0)) {
-        print STDERR "--\n";
-        print STDERR "-- WARNING: gnuplot failed.\n";
-        print STDERR "--\n";
-        print STDERR "----------------------------------------\n";
+        if (runCommandSilently($path, "$gnuplot < /dev/null ./$name.histogram.gp > /dev/null 2>&1", 0)) {
+            print STDERR "--\n";
+            print STDERR "-- WARNING: gnuplot failed.\n";
+            print STDERR "--\n";
+            print STDERR "----------------------------------------\n";
+        }
+
+        stashFile("$path/$name.histogram.gp");
+        stashFile("$path/$name.histogram.$format");
     }
-
-    stashFile("$path/$ofile.histogram.$suffix.gp");
-    stashFile("$path/$ofile.histogram.$suffix.$format");
-}
-
-
-
-sub merylParameters ($$) {
-    my $asm    = shift @_;
-    my $tag    = shift @_;
-
-    my ($base, $path, $merSize, $merThresh, $merScale, $merDistinct, $merTotal, $ffile, $ofile);
-
-    #  Find a place to run stuff.
-
-    $base = "haplotype"   if ($tag eq "hap");
-    $base = "correction"  if ($tag eq "cor");
-    $base = "trimming"    if ($tag eq "obt");
-    $base = "unitigging"  if ($tag eq "utg");
-
-    $path = "$base/0-mercounts";
-    $path = "$path-$asm" if ($tag eq "hap");
-
-    #  Decide on which set of parameters we need to be using, and make output file names.
-
-    if (getGlobal("${tag}Overlapper") eq "ovl") {
-        $merSize      = getGlobal("${tag}OvlMerSize");
-        $merThresh    = getGlobal("${tag}OvlMerThreshold");
-        $merScale     = 1.0;
-        $merDistinct  = getGlobal("${tag}OvlMerDistinct");
-        $merTotal     = getGlobal("${tag}OvlMerTotal");
-
-        $ffile = "$asm.ms$merSize.frequentMers.fasta";   #  The fasta file we should be creating (ends in FASTA).
-        $ofile = "$asm.ms$merSize";                      #  The meryl database 'intermediate file'.
-
-    } elsif (getGlobal("${tag}Overlapper") eq "mhap") {
-        $merSize      = getGlobal("${tag}mhapMerSize");
-        $merThresh    = undef;
-        $merScale     = 1.0;
-        $merDistinct  = undef;
-        $merTotal     = undef;
-
-        $ffile = "$asm.ms$merSize.frequentMers.ignore.gz";  #  The mhap-specific file we should be creating (ends in IGNORE).
-        $ofile = "$asm.ms$merSize";                         #  The meryl database 'intermediate file'.
-
-    } elsif (getGlobal("${tag}Overlapper") eq "minimap") {
-        $merSize     = 0;
-        $merThresh   = 0;
-        $merScale    = 1.0;
-        $merDistinct = undef;
-        $merTotal    = undef;
-
-        $ffile = undef;
-        $ofile = undef;
-
-    } else {
-        caFailure("unknown ${tag}Overlapper '" . getGlobal("${tag}Overlapper") . "'", undef);
-    }
-
-    #  Decode the threshold.  Auto with modifications ("auto * X") or ("auto / X")?
-
-    if ($merThresh =~ m/auto\s*\*\s*(\S+)/) {
-        $merThresh = "auto";
-        $merScale  = $1;
-    }
-
-    if ($merThresh =~ m/auto\s*\/\s*(\S+)/) {
-        $merThresh = "auto";
-        $merScale  = 1.0 / $1;
-    }
-
-    #  Return all this goodness.
-
-    return($base, $path, $merSize, $merThresh, $merScale, $merDistinct, $merTotal, $ffile, $ofile);
 }
 
 
@@ -378,120 +315,424 @@ sub merylConfigure ($$) {
     my $bin    = getBinDirectory();
     my $cmd;
 
-    my ($base, $path, $merSize, $merThresh, $merScale, $merDistinct, $merTotal, $ffile, $ofile) = merylParameters($asm, $tag);
+    my ($base, $path, $name, $merSize) = merylParameters($asm, $tag);
 
-    goto allDone   if (skipStage($asm, "$tag-merylConfigure") == 1);
-    goto allDone   if (fileExists("$path/meryl.sh"));
-    goto allDone   if (!defined($ffile));
-    goto allDone   if (fileExists("$path/$ffile"));
-    goto allDone   if (fileExists("$path/$ofile.mcidx") && fileExists("$path/$ofile.mcdat"));
+    goto allDone   if ($merSize == 0);
+
+    goto allDone   if (fileExists("$path/meryl-count.sh") &&            #  Configure 'output' exists.
+                       fileExists("$path/meryl-process.sh"));           #
+    goto allDone   if (fileExists("$path/$name.dump") &&                #  Meryl output(s) exist
+                       fileExists("$path/$name.ignore.gz"));            #
 
     make_path($path)  if (! -d $path);
 
+    #
     #  User supplied mers?  Copy them to the proper location and exit.
+    #
 
-    my $sfile = getGlobal("${tag}OvlFrequentMers");
+    if (defined(getGlobal("${tag}OvlFrequentMers"))) {
+        my $merFile = getGlobal("${tag}OvlFrequentMers");
 
-    if (defined($sfile) && ! -e "$path/$ffile") {
-        caFailure("${tag}OvlFrequentMers '$sfile' not found", undef)  if (! -e $sfile);
-        copy($sfile, "$path/$ffile");
-        stashFile("$path/$ffile");
+        caFailure("${tag}OvlFrequentMers '$merFile' not found", undef)  if (! -e $merFile);
+
+        copy($merFile, "$path/$name.dump");
+        stashFile("$path/$name.dump");
+
         goto allDone;
     }
 
-    #  No filtering?  Make an empty file and exit.
+    #
+    #  Based on the number of reads in the store, decide on a preliminary set
+    #  of batch sizes to use.
+    #
 
-    if ((defined($merThresh))    &&
-        ($merThresh ne "auto")   &&
-        ($merThresh == 0)        &&
-        (!defined($merDistinct)) &&
-        (!defined($merTotal))) {
-        touch("$path/$ffile");
-        stashFile("$path/$ffile");
-        goto allDone;
-    }
+    my $nr  = getNumberOfReadsInStore($asm, $tag);
+    my $nb  = getNumberOfBasesInStore($asm, $tag);
 
-    #  Nope, build a script for computing kmer counts.
+    my $maxSplit = int(floor($nb / 100000000));
 
-    my $mem = int(getGlobal("merylMemory")  * 1024 * 0.8);   #  Because meryl expects megabytes, not gigabytes.
+    $maxSplit = 1    if ($maxSplit == 0);
+    $maxSplit = $nr  if ($nr < $maxSplit);
+
+    #
+    #  Let meryl run to decide how much memory it wants to use.
+    #
+    #  This is a pretty stupid way to do it; this really should be built into meryl itself.
+    #
+
+    my $mem = getGlobal("merylMemory");
     my $thr = getGlobal("merylThreads");
     my $cov = getExpectedCoverage($tag, $asm);
 
-    caExit("merylMemory isn't defined?", undef)   if (!defined($mem));
-    caExit("merylThreads isn't defined?", undef)  if (!defined($thr));
-
-    open(F, "> $path/meryl.sh") or caExit("can't open '$path/meryl.sh' for writing: $1", undef);
-
+    open(F, "> $path/meryl-configure.sh");
     print F "#!" . getGlobal("shell") . "\n";
     print F "\n";
     print F getBinDirectoryShellCode();
     print F "\n";
     print F setWorkDirectoryShellCode($path);
-    print F fetchStoreShellCode("$base/$asm.gkpStore", $path);
-    print F "\n";
-    print F "#  Purge any previous intermediate result.  Possibly not needed, but safer.\n";
-    print F "\n";
-    print F "rm -f ./$ofile.WORKING*\n";
-    print F "\n";
-    print F "\$bin/meryl \\\n";
-    print F "  -B -C -L 2 -v -m $merSize -threads $thr -memory $mem \\\n";
-    print F "  -s ../$asm.gkpStore \\\n";
-    print F "  -o ./$ofile.WORKING \\\n";
-    print F "&& \\\n";
-    print F "mv ./$ofile.WORKING.mcdat ./$ofile.mcdat \\\n";
-    print F "&& \\\n";
-    print F "mv ./$ofile.WORKING.mcidx ./$ofile.mcidx\n";
-    print F "\n";
-    print F stashFileShellCode("$path", "$ofile.mcdat", "");
-    print F "\n";
-    print F stashFileShellCode("$path", "$ofile.mcidx", "");
-    print F "\n";
-    print F "\n";
-    print F "#  Dump a histogram\n";
-    print F "\n";
-    print F "\$bin/meryl \\\n";
-    print F "  -Dh -s ./$ofile \\\n";
-    print F ">  ./$ofile.histogram.WORKING \\\n";
-    print F "2> ./$ofile.histogram.info \\\n";
-    print F "&& \\\n";
-    print F "mv -f ./$ofile.histogram.WORKING ./$ofile.histogram\n";
-    print F "\n";
-    print F stashFileShellCode("$path", "$ofile.histogram", "");
-    print F "\n";
-    print F stashFileShellCode("$path", "$ofile.histogram.info", "");
-    print F "\n";
-    print F "\n";
-    print F "#  Compute a nice kmer threshold.\n";
-    print F "\n";
-    print F "\$bin/estimate-mer-threshold \\\n";
-    print F "  -h ./$ofile.histogram \\\n";
-    print F "  -c $cov \\\n";
-    print F ">  ./$ofile.estMerThresh.out.WORKING \\\n";
-    print F "2> ./$ofile.estMerThresh.err \\\n";
-    print F "&& \\\n";
-    print F "mv ./$ofile.estMerThresh.out.WORKING ./$ofile.estMerThresh.out\n";
-    print F "\n";
-    print F stashFileShellCode("$path", "$ofile.estMerThresh.out", "");
-    print F "\n";
-    print F stashFileShellCode("$path", "$ofile.estMerThresh.err", "");
-    print F "\n";
+    print F fetchSeqStoreShellCode($asm, $path, "");
+
+    foreach my $ss (qw(01 02 04 06 08 12 16 20 24 32 40 48 56 64 96)) {
+        next  if ($ss > $maxSplit);
+
+        print F "\n";
+        print F "$bin/meryl -C k=$merSize threads=$thr memory=$mem \\\n";
+        print F "  count segment=1/$ss ../../$asm.seqStore \\\n";
+        print F "> $name.config.$ss.out 2>&1";
+    }
     print F "\n";
     print F "exit 0\n";
-
     close(F);
 
-    makeExecutable("$path/meryl.sh");
-    stashFile("$path/meryl.sh");
+    makeExecutable("$path/meryl-configure.sh");
+    stashFile("$path/meryl-configure.sh");
+
+    my $runConfigure = 1;
+
+    foreach my $ss (qw(01 02 04 06 08 12 16 20 24 32 40 48 56 64 96)) {
+        if (-e "$path/$name.config.$ss.out") {
+            $runConfigure = 0;
+            next;
+        }
+    }
+
+    if ($runConfigure) {
+        if (runCommand($path, "./meryl-configure.sh > ./meryl-configure.err 2>&1")) {
+            caFailure("meryl failed to configure", "$path/meryl-configure.err");
+        }
+        unlink("$path/meryl-configure.err");
+    }
+
+    #
+    #  Make sense of all the configuration attempts.  Pick the smallest number of segments that
+    #  results in the smallest number of batches.
+    #
+
+    my $merylMemory;
+    my $merylSegments;
+    my $merylBatches  = 1048576;
+
+    printf(STDERR "--  segments   memory batches\n");
+    printf(STDERR "--  -------- -------- -------\n");
+
+    foreach my $ss (qw(01 02 04 06 08 12 16 20 24 32 40 48 56 64 96)) {
+        next  if ($ss > $maxSplit);
+
+        my $mem = undef;
+        my $bat = undef;
+
+        if (! -e "$path/$name.config.$ss.out") {
+            next;
+        }
+
+        #  This message comes from meryl/merylOp-count.C reportNumberOfOutputs().
+
+        open(F, "< $path/$name.config.$ss.out") or caExit("can't open '$path/$name.config.$ss.out' for reading: $!", undef);
+        while (<F>) {
+            if (m/Configured\s+\w+\s+mode\s+for\s+(\d*.\d*)\s+GB\s+memory\s+per\s+batch,\s+and\s+up\s+to\s+(\d+)\s+batch/) {
+                $mem = $1;
+                $bat = $2;
+            }
+        }
+        close(F);
+
+        caExit("failed to parse meryl configure output '$path/$name.config.$ss.out'", "$path/$name.config.$ss.out")   if (!defined($mem) || !defined($bat));
+
+        if ($bat < $merylBatches) {
+            $merylMemory   = int($mem) + 2;
+            $merylSegments =     $ss;
+            $merylBatches  =     $bat;
+        }
+
+        printf(STDERR "--       %3s %5.2f GB     %3d\n", $ss, $mem, $bat);
+    }
+
+    print STDERR "--\n";
+    print STDERR "--  For $nr reads with $nb bases, limit to $maxSplit batch", ($maxSplit == 1) ? "" : "es", ".\n";
+    print STDERR "--  Will count kmers using $merylSegments jobs, each using $merylMemory GB and $thr threads.\n";
+    print STDERR "--\n";
+
+    setGlobal("merylMemory",  $merylMemory);
+    setGlobal("merylThreads", $thr);    #  Redundant.
+
+    #
+    #  Build a script for running meryl.  A similar version is used in HaplotypeReads.pm.
+    #
+
+    open(F, "> $path/meryl-count.sh") or caExit("can't open '$path/meryl-count.sh' for writing: $!", undef);
+    print F "#!" . getGlobal("shell") . "\n";
+    print F "\n";
+    print F getBinDirectoryShellCode();
+    print F "\n";
+    print F setWorkDirectoryShellCode($path);
+    print F "\n";
+    print F getJobIDShellCode();
+    print F "\n";
+    print F "if [ \$jobid -gt $merylSegments ]; then\n";
+    print F "  echo Error: Only $merylSegments jobs, you asked for \$jobid.\n";
+    print F "  exit 1\n";
+    print F "fi\n";
+    print F "\n";
+    print F "jobid=`printf %02d \$jobid`\n";
+    print F "\n";
+    print F "#  If the meryl database exists, we're done.\n";
+    print F "\n";
+    print F "if [ -e ./$asm.\$jobid.meryl/merylIndex ] ; then\n";
+    print F "  echo Kmers for batch \$jobid exist.\n";
+    print F "  exit 0\n";
+    print F "fi\n";
+    print F "\n";
+    print F "#  If the meryl output exists in the object store, we're also done.\n";
+    print F "\n";
+    print F fileExistsShellCode("exist1", "$path", "$asm.\$jobid.meryl.tar");
+    print F "if [ \$exist1 = true ] ; then\n";
+    print F "  echo Kmers for batch \$jobid exist in the object store.\n";
+    print F "  exit 0\n";
+    print F "fi\n";
+    print F "\n";
+    print F "#  Nope, not done.  Fetch the sequence store.\n";
+    print F "\n";
+    print F fetchSeqStoreShellCode($asm, $path, "");
+    print F "\n";
+    print F "#  And compute.\n";
+    print F "\n";
+    print F "$bin/meryl k=$merSize threads=$thr memory=$merylMemory \\\n";
+    print F "  count \\\n";
+    print F "    segment=\$jobid/$merylSegments ../../$asm.seqStore \\\n";
+    print F "    output ./$asm.\$jobid.meryl.WORKING \\\n";
+    print F "&& \\\n";
+    print F "mv -f ./$asm.\$jobid.meryl.WORKING ./$asm.\$jobid.meryl\n";
+    print F "\n";
+
+    if (defined(getGlobal("objectStore"))) {
+        print F stashMerylShellCode($path, "$asm.\$jobid.meryl", "");
+    }
+
+    print F "\n";
+    print F "exit 0\n";
+    close(F);
+
+    makeExecutable("$path/meryl-count.sh");
+    stashFile("$path/meryl-count.sh");
+
+    #
+    #  Build a script for processing meryl results
+    #
+
+    my @jobs;
+
+    for (my $seg=1; $seg<=$merylSegments; $seg++) {
+        push @jobs, substr("00$seg", -2);
+    }
+
+    open(F, "> $path/meryl-process.sh") or caExit("can't open '$path/meryl-process.sh' for writing: $!", undef);
+    print F "#!" . getGlobal("shell") . "\n";
+    print F "\n";
+    print F getBinDirectoryShellCode();
+    print F "\n";
+    print F setWorkDirectoryShellCode($path);
+    print F "\n";
+    print F getJobIDShellCode();
+    print F "\n";
+    print F "if [ \$jobid -gt 1 ]; then\n";
+    print F "  echo Error: Only 1 job, you asked for \$jobid.\n";
+    print F "  exit 1\n";
+    print F "fi\n";
+    print F "\n";
+
+    print F "#  If the meryl ignore files exst, then we're done.\n";
+    print F "\n";
+    print F "if [ -e ./$name.histogram -a -e ./$name.dump -a -e ./$name.ignore.gz ] ; then\n";
+    print F "  exit 0\n";
+    print F "fi\n";
+    print F "\n";
+    print F "#  If those exist in the object store, we're also done.\n";
+    print F "\n";
+    print F fileExistsShellCode("exists1", "$path", "$name.histogram");
+    print F fileExistsShellCode("exists2", "$path", "$name.dump");
+    print F fileExistsShellCode("exists3", "$path", "$name.ignore.gz");
+    print F "if [ \$exists1 = true -a \$exists2 = true -a \$exists3 = true ] ; then\n";
+    print F "  echo \"Output files '$name.histogram', '$name.dump' and '$name.ignore.gz' exist in '$path'.\"\n";
+    print F "  exit 0\n";
+    print F "fi\n";
+    print F "\n";
+    print F "\n";
+    print F "#  Nope, not done.  Fetch all the intermediate meryl databases.\n";
+    print F "\n";
+
+    if (defined(getGlobal("objectStore"))) {
+        print F fetchMerylShellCode($path, "$asm.$_.meryl", "")   foreach (@jobs);   #  One line, yay, but not use of $_.
+    }
+
+    print F "\n";
+    print F "#\n";
+    print F "#  Merge counting jobs, strip out unique kmers.\n";
+    print F "#\n";
+    print F "\n";
+    print F "if [ ! -e ./$name/merylIndex ] ; then\n";
+    print F "  $bin/meryl threads=$thr memory=$merylMemory \\\n";
+    print F "    greater-than 1 \\\n";
+    print F "      output $name.WORKING \\\n";
+    print F "      union-sum  \\\n";
+    print F "        ./$asm.$_.meryl \\\n"   foreach (@jobs);   #  One line, yay, but not use of $_.
+    print F "  && \\\n";
+    print F "  mv -f ./$name.WORKING ./$name\n";
+    print F "\n";
+    print F "  #  Fail if there is no meryl database.\n";
+    print F "  if [ ! -e ./$name/merylIndex ] ; then\n";
+    print F "    echo meryl merge failed.\n";
+    print F "    exit 1\n";
+    print F "  fi\n";
+    print F "\n";
+    print F "  #  Remove meryl intermediate files.\n";
+    print F "  rm -rf ./$asm.$_.meryl ./$asm.$_.meryl.err\n"       foreach (@jobs);   #  One line, yay, but not use of $_.
+    print F "fi\n";
+    print F "\n";
+    print F "#\n";
+    print F "#  Dump a histogram, 'cause they're useful.\n";
+    print F "#\n";
+    print F "\n";
+    print F "if [ ! -e ./$name.histogram ] ; then\n";
+    print F "  $bin/meryl threads=1 memory=1 \\\n";
+    print F "    statistics ./$name \\\n";
+    print F "  > ./$name.histogram\n";
+    print F "fi\n";
+    print F "\n";
+
+    my $mthresh   = undef;
+    my $mdistinct = undef;
+    my $mwordfreq = undef;
+
+    if (getGlobal("${tag}Overlapper") eq "ovl") {
+        $mthresh   = getGlobal("${tag}OvlMerThreshold");       #  Kmer must meet at least BOTH thresholds.
+        $mdistinct = getGlobal("${tag}OvlMerDistinct");
+        $mwordfreq = undef;
+    }
+
+    if (getGlobal("${tag}Overlapper") eq "mhap") {
+        $mthresh   = int(5.0 * getExpectedCoverage($tag, $asm));
+        $mdistinct = undef;
+        $mwordfreq = getGlobal("${tag}MhapFilterThreshold");
+    }
+
+    if ("${tag}Overlapper" eq "minimap") {
+    }
+
+    print F "#\n";
+    print F "#  Dump frequent mers.\n";
+    print F "#\n";
+    print F "#  The indenting of the at-least options is misleading.  'print'\n";
+    print F "#  takes input from the first 'at-least', which that takes input from\n";
+    print F "#  the second 'at-least'.  The effect is the same as taking the\n";
+    print F "#  'intersection' of all the 'at-least' filters -- logically, it is\n";
+    print F "#  doing 'at-least X AND at-least Y AND at-least Z'.\n";
+    print F "#\n";
+    print F "\n";
+    print F "if [ ! -e ./$name.dump ] ; then\n";
+    print F "  $bin/meryl threads=$thr memory=$merylMemory \\\n";
+    print F "    print ./$name.##.dump \\\n";
+    print F "      at-least distinct=$mdistinct \\\n"         if (defined($mdistinct));
+    print F "      at-least threshold=$mthresh \\\n"          if (defined($mthresh));
+    print F "      at-least word-frequency=$mwordfreq \\\n"   if (defined($mwordfreq));
+    print F "        ./$name\n";
+    print F "\n";
+    print F "  cat ./$name.??.dump > ./$name.dump\n";
+    print F "  rm -f ./$name.??.dump\n";
+    print F "fi\n";
+    print F "\n";
+    print F "#\n";
+    print F "#  Convert the dumped kmers into a mhap ignore list.\n";
+    print F "#\n";
+    print F "#    numKmers - number of kmers we're filtering\n";
+    print F "#    totKmers - total number of kmers in the dataset\n";
+    print F "\n";
+    print F "if [ ! -e ./$name.ignore.gz ] ; then\n";
+    print F "  numKmers=`wc -l < ./$name.dump`\n";
+    print F "  totKmers=`$bin/meryl statistics ./$name | grep present | awk '{ print \$2 }'`\n";
+    print F "\n";
+
+    if (defined(getGlobal("objectStore"))) {
+        print F fetchFileShellCode($path, "meryl-make-ignore.pl", "  ");
+    }
+
+    print F "\n";
+    print F "  ./meryl-make-ignore.pl \$numKmers \$totKmers < ./$name.dump | gzip -1c > ./$name.ignore.gz\n";
+    print F "fi\n";
+    print F "\n";
+
+    if (defined(getGlobal("objectStore"))) {
+        print F "\n";
+        print F "#  Save the final meryl database.\n";
+        print F "\n";
+        print F stashMerylShellCode($path, $name, "");
+
+        print F "\n";
+        print F "#  Save the histogram.\n";
+        print F "\n";
+        print F stashFileShellCode($path, "$name.histogram", "");
+
+        print F "\n";
+        print F "#  Save the overlapInCore ignore file.\n";
+        print F "\n";
+        print F stashFileShellCode($path, "$name.dump", "");
+
+        print F "\n";
+        print F "#  Save the mhap ignore file.\n";
+        print F "\n";
+        print F stashFileShellCode($path, "$name.ignore.gz", "");
+
+    }
+
+    print F "\n";
+    print F "exit 0\n";
+    close(F);
+
+    makeExecutable("$path/meryl-process.sh");
+    stashFile("$path/meryl-process.sh");
+
+    #
+    #  Build a (tiny) script for converting meryl dumps into mhap ignore files.
+    #
+
+    open(F, "> $path/meryl-make-ignore.pl") or caExit("can't open '$path/meryl-make-ignore.pl' for writing: $!", undef);
+    print F "#!/usr/bin/env perl\n";
+    print F "\n";
+    print F "my \$numKmers = shift @ARGV;  #  The number of kmers in the input dump file.\n";
+    print F "my \$totKmers = shift @ARGV;  #  The total number of kmers in the reads.\n";
+    print F "\n";
+    print F "printf \"%s\\t%d\\n\", 0, \$numKmers * 2;\n";
+    print F "\n";
+    print F "while (<STDIN>) {\n";
+    print F "  chomp;\n";
+    print F "\n";
+    print F "  my \@v = split '\\s+', \$_;\n";
+    print F "\n";
+    print F "  printf \"%s\\t%.10f\\t%d\\t%d\\n\", \$v[0], \$v[1] / \$totKmers, \$v[1], \$totKmers;\n";
+    print F "\n";
+    print F "  \$v[0] =  reverse \$v[0];\n";
+    print F "  \$v[0] =~ tr/ACGT/TGCA/;\n";
+    print F "\n";
+    print F "  printf \"%s\\t%.10f\\t%d\\t%d\\n\", \$v[0], \$v[1] / \$totKmers, \$v[1], \$totKmers;\n";
+    print F "}\n";
+    print F "\n";
+    print F "exit(0);\n";
+    close(F);
+
+    makeExecutable("$path/meryl-make-ignore.pl");
+    stashFile("$path/meryl-make-ignore.pl");
+
 
   finishStage:
-    emitStage($asm, "merylConfigure");
+    generateReport($asm);
+    resetIteration("merylConfigure");
 
   allDone:
+    stopAfter("meryl-configure");
 }
 
 
 
-sub merylCheck ($$) {
+sub merylCountCheck ($$) {
     my $asm     = shift @_;
     my $tag     = shift @_;
     my $attempt = getGlobal("canuIteration");
@@ -499,384 +740,167 @@ sub merylCheck ($$) {
     my $bin     = getBinDirectory();
     my $cmd;
 
-    my ($base, $path, $merSize, $merThresh, $merScale, $merDistinct, $merTotal, $ffile, $ofile) = merylParameters($asm, $tag);
+    my ($base, $path, $name, $merSize) = merylParameters($asm, $tag);
 
     #  If the frequent mer file exists, don't bother running meryl.  We don't really need the
     #  databases.
 
-    goto allDone      if (skipStage($asm, "$tag-meryl") == 1);
-    goto allDone      if (fileExists("$path/meryl.success"));
-    goto finishStage  if (!defined($ffile));
-    goto finishStage  if (fileExists("$path/$ffile"));
-    goto finishStage  if (fileExists("$path/$ofile.mcidx") && fileExists("$path/$ofile.mcdat"));
+    goto allDone      if ($merSize == 0);
 
-    fetchFile("$path/meryl.sh");
+    goto allDone      if (fileExists("$path/meryl-count.success"));
+    goto allDone      if (fileExists("$path/$name.dump") &&
+                          fileExists("$path/$name.ignore.gz"));
+
+    goto finishStage  if (fileExists("$path/$name/merylIndex"));
+
+    fetchFile("$path/meryl-count.sh");
+
+    #  Scan the script to determine how many jobs there are.
+
+    my $jobs = 0;
+
+    open(F, "< $path/meryl-count.sh") or caExit("can't open '$path/meryl-count.sh' for reading: $!", undef);
+    while (<F>) {
+        if (m/Only\s(\d+)\sjobs/) {
+            $jobs = $1;
+        }
+    }
+    close(F);
+
+    caExit("failed to find the number of jobs in '$path/meryl-count.sh'", undef)  if ($jobs == 0);
+
+    #  Figure out if all the tasks finished correctly.
+
+    my $currentJobID = "01";
+
+    my @successJobs;
+    my @failedJobs;
+    my $failureMessage = "";
+
+    for (my $job=1; $job <= $jobs; $job++) {
+        if      ((fileExists("$path/$asm.$currentJobID.meryl")) ||
+                 (fileExists("$path/$asm.$currentJobID.meryl.tar"))) {
+            push @successJobs, "$path/$asm.$currentJobID.meryl\n";
+
+        } else {
+            $failureMessage .= "--   job $asm.$currentJobID.meryl FAILED.\n";
+            push @failedJobs, $job;
+        }
+
+        $currentJobID++;
+    }
+
+    #  Failed jobs, retry.
+
+    if (scalar(@failedJobs) > 0) {
+
+        #  If too many attempts, give up.
+
+        if ($attempt >= getGlobal("canuIterationMax")) {
+            print STDERR "--\n";
+            print STDERR "-- Kmer counting (meryl-count) jobs failed, tried $attempt times, giving up.\n";
+            print STDERR $failureMessage;
+            print STDERR "--\n";
+            caExit(undef, undef);
+        }
+
+        if ($attempt > 0) {
+            print STDERR "--\n";
+            print STDERR "-- Kmer counting (meryl-count) jobs failed, retry.\n";
+            print STDERR $failureMessage;
+            print STDERR "--\n";
+        }
+
+        #  Otherwise, run some jobs.
+
+        generateReport($asm);
+
+        submitOrRunParallelJob($asm, "meryl", $path, "meryl-count", @failedJobs);
+        return;
+    }
+
+  finishStage:
+    print STDERR "-- Found ", scalar(@successJobs), " Kmer counting (meryl) outputs.\n";
+
+    make_path($path);   #  With object storage, we might not have this directory!
+
+    open(F, "> $path/meryl-count.success") or caExit("can't open '$path/meryl-count.success' for writing: $!", undef);
+    close(F);
+
+    stashFile("$path/meryl-count.success");
+
+    generateReport($asm);
+    resetIteration("$tag-merylCountCheck");
+
+  allDone:
+    stopAfter("meryl-count");
+}
+
+
+
+sub merylProcessCheck ($$) {
+    my $asm     = shift @_;
+    my $tag     = shift @_;
+    my $attempt = getGlobal("canuIteration");
+
+    my $bin     = getBinDirectory();
+    my $cmd;
+
+    my ($base, $path, $name, $merSize) = merylParameters($asm, $tag);
+
+    #  If the frequent mer file exists, don't bother running meryl.  We don't really need the
+    #  databases.
+
+    goto allDone      if ($merSize == 0);
+
+    goto allDone      if (fileExists("$path/meryl-process.success"));
+    goto finishStage  if (fileExists("$path/$name.dump") &&
+                          fileExists("$path/$name.ignore.gz"));
+
+    fetchFile("$path/meryl-process.sh");
 
     #  Since there is only one job, if we get here, we're not done.  Any other 'check' function
     #  shows how to process multiple jobs.  This only checks for the existence of the final outputs.
-    #  (unitigger is the same)
+    #  (alignGFA and unitig are the same)
 
     #  If too many attempts, give up.
 
     if ($attempt >= getGlobal("canuIterationMax")) {
         print STDERR "--\n";
-        print STDERR "-- Meryl failed, tried $attempt times, giving up.\n";
+        print STDERR "-- meryl-process failed, tried $attempt times, giving up.\n";
         print STDERR "--\n";
         caExit(undef, undef);
     }
 
     if ($attempt > 0) {
         print STDERR "--\n";
-        print STDERR "-- Meryl failed, retry.\n";
+        print STDERR "-- meryl-process failed, retry.\n";
         print STDERR "--\n";
     }
 
     #  Otherwise, run some jobs.
 
-    emitStage($asm, "merylCheck", $attempt);
+    generateReport($asm);
 
-    submitOrRunParallelJob($asm, "meryl", $path, "meryl", (1));
+    submitOrRunParallelJob($asm, "meryl", $path, "meryl-process", (1));
     return;
 
   finishStage:
-    print STDERR "-- Meryl finished successfully.\n";
+    merylPlotHistogram($path, $asm, $name, 1024);
+
+    addToReport("${tag}Meryl", merylGenerateHistogram($asm, $tag));
 
     make_path($path);   #  With object storage, we might not have this directory!
 
-    open(F, "> $path/meryl.success") or caExit("can't open '$path/meryl.success' for writing: $!", undef);
+    open(F, "> $path/meryl-process.success") or caExit("can't open '$path/meryl-process.success' for writing: $!", undef);
     close(F);
 
-    stashFile("$path/meryl.success");
+    stashFile("$path/meryl-process.success");
 
-    emitStage($asm, "merylCheck");
-
-  allDone:
-}
-
-sub merylSubtract ($$) {
-    my $asm     = shift @_;
-    my $tag     = shift @_;
-
-    my $bin     = getBinDirectory();
-    my $cmd;
-
-    my ($base, $path, $merSize, $merThresh, $merScale, $merDistinct, $merTotal, $ffile, $ofile) = merylParameters($asm, $tag);
-
-    goto allDone   if (skipStage($asm, "$tag-meryl") == 1);
-    goto allDone   if(fileExists("$path/$asm.ms$merSize.only.mcdat"));
-
-    my $otherHaplotypes = "";
-    my $toMerge = 0;
-
-    my @haplotypes = getHaplotypes($base);
-    foreach my $haplotype (@haplotypes) {
-       if ("$base/0-mercounts-$haplotype" ne $path) {
-          $otherHaplotypes .= "-s ../0-mercounts-$haplotype/$haplotype.ms$merSize";
-          $toMerge++;
-       }
-    }
-    if ($toMerge > 1) {
-       # run merge of other haplotypes, to create a single one, update otherHaplotypes to point to that
-       caFailure("Error: more than two haplotypes isn't implemented yet!", "$path");
-    }
-    if (runCommand($path, "$bin/meryl -M difference -s $asm.ms$merSize $otherHaplotypes -o $asm.ms$merSize.only > $asm.difference.out 2> $asm.difference.err")) {
-       caFailure("meryl failed to difference", "$asm.difference.err");
-    }
-    addToReport("${tag}Meryl", merylGenerateHistogram($asm, $tag));
+    generateReport($asm);
+    resetIteration("meryl-process");
 
   allDone:
-}
-
-sub merylFinishSubtraction($$) {
-    my $asm     = shift @_;
-    my $tag     = shift @_;
-
-    my $bin     = getBinDirectory();
-    my $cmd;
-
-    my ($base, $path, $merSize, $merThresh, $merScale, $merDistinct, $merTotal, $ffile, $ofile) = merylParameters($asm, $tag);
-
-    goto allDone      if (skipStage($asm, "$tag-meryl") == 1);
-    goto allDone      if (fileExists("$path/$ofile.threshold"));
-    goto finishStage  if (fileExists("$path/$ofile.mcidx") && fileExists("$path/$ofile.mcdat"));
-
-  finishStage:
-
-    # also figure out the histogram info for next step
-    fetchFile("$path/$ofile.histogram");
-
-    my $d = 0;
-    my $prevD = -1;
-    my $prevDPrime = 0;
-    my $dPrime = 0;
-    my $minCount = 0;
-    my $minCov = 0;
-    my $maxCov = 0;
-    my $prevCount = 0;
-
-    open(F, "< $path/$ofile.histogram") or caFailure("failed to read mer histogram from '$path/$ofile.histogram'", undef);
-    while (<F>) {
-       my ($threshold, $num, $distinct, $total) = split '\s+', $_;
-       if ($prevD == -1) {
-          $prevD = $num;
-          $prevCount = $num;
-        } else {
-           $d = $num - $prevCount;
-           $dPrime = $d - $prevD;
-           if ($d * $prevD < 0) {
-              if ($d > $prevD) {
-                 $minCov = $threshold-1 if ($minCov == 0);
-                 $minCount = $prevCount;
-              }
-           }
-           if ($threshold - 5 > $minCov && $num < $minCount*0.75) {
-              $maxCov = $threshold;
-              last;
-           }
-           $prevCount = $num;
-           $prevD = $d;
-           $prevDPrime = $dPrime;
-        }
-    }
-    close(F);
-
-    print STDERR "-- Meryl finished successfully with threshold $minCov to $maxCov for $asm.\n";
-    open(F, "> $path/$ofile.threshold") or caExit("can't open '$path/$ofile.threshold' for writing: $!", undef);
-    printf (F "$minCov\t$maxCov\n");
-    close(F);
-
-    stashFile("$path/$ofile.threshold");
-
-    unlink "$path/$ofile.mcidx"   if (getGlobal("saveMerCounts") == 0);
-    unlink "$path/$ofile.mcdat"   if (getGlobal("saveMerCounts") == 0);
-
-    emitStage($asm, "$tag-meryl");
-
-  allDone:
-     stopAfter("meryl");
-}
-
-sub merylProcess ($$) {
-    my $asm     = shift @_;
-    my $tag     = shift @_;
-
-    my $bin     = getBinDirectory();
-    my $cmd;
-
-    my ($base, $path, $merSize, $merThresh, $merScale, $merDistinct, $merTotal, $ffile, $ofile) = merylParameters($asm, $tag);
-
-    #  ffile exists if we've already output it here, or if user supplied a file, or if user wants no masking.
-
-    goto allDone   if (skipStage($asm, "$tag-meryl") == 1);
-    goto allDone   if (fileExists("$path/$ffile"));
-
-    #  Compute a threshold, if needed.
-
-    if ($merThresh eq "auto") {
-        fetchFile("$path/$ofile.estMerThresh.out");
-
-        open(F, "< $path/$ofile.estMerThresh.out") or caFailure("failed to read estimated mer threshold from '$path/$ofile.estMerThresh.out'", undef);
-        $merThresh = <F>;
-        $merThresh = int($merThresh * $merScale) + 1;
-        close(F);
-    }
-
-    #  Compute a threshold based on the fraction distinct or total.
-
-    if (defined($merDistinct) || defined($merTotal)) {
-        fetchFile("$path/$ofile.histogram");
-
-        open(F, "< $path/$ofile.histogram") or caFailure("failed to read mer histogram from '$path/$ofile.histogram'", undef);
-        while (<F>) {
-            my ($threshold, $num, $distinct, $total) = split '\s+', $_;
-
-            if (($merThresh > 0) && ($merThresh < $threshold)) {
-                print STDERR "-- Supplied merThreshold $merThresh is the smallest.\n";
-                last;
-            }
-
-            if ((defined($merDistinct)) && ($merDistinct <= $distinct)) {
-                $merThresh = (($merThresh > 0) && ($merThresh < $threshold)) ? $merThresh : $threshold;
-                print STDERR "-- Supplied merDistinct $merDistinct with threshold $threshold is the smallest.\n";
-                last;
-            }
-
-            if ((defined($merTotal)) && ($merTotal <= $total)) {
-                $merThresh = (($merThresh > 0) && ($merThresh < $threshold)) ? $merThresh : $threshold;
-                print STDERR "-- Supplied merTotal $merTotal with threshold $threshold is the smallest.\n";
-                last;
-            }
-        }
-        close(F);
-    }
-
-    #  Plot the histogram - annotated with the thesholds
-
-    merylPlotHistogram($path, $ofile, "lg", 1024);    #  $ofile has merSize encoded in it
-    merylPlotHistogram($path, $ofile, "sm", 256);
-
-    #  Display the histogram, and save to the report.  Shouldn't this (and the plots above)
-    #  go in finishStage?
-
-    addToReport("${tag}Meryl", merylGenerateHistogram($asm, $tag));
-
-    #  Generate the frequent mers for overlapper
-
-    if (getGlobal("${tag}Overlapper") eq "ovl") {
-        fetchFile("$path/$ofile.mcdat");
-        fetchFile("$path/$ofile.mcidx");
-
-        if ((! -e "$path/$ofile.mcdat") ||
-            (! -e "$path/$ofile.mcdat")) {
-            caFailure("meryl can't dump frequent mers, databases don't exist.  Remove $path/meryl.success to try again.", undef);
-        }
-
-        if (runCommand($path, "$bin/meryl -Dt -n $merThresh -s ./$ofile > ./$ffile 2> ./$ffile.err")) {
-            unlink "$path/$ffile";
-            caFailure("meryl failed to dump frequent mers", "$path/$ffile.err");
-        }
-        unlink "$path/$ffile.err";
-
-        stashFile("$path/$ffile");
-    }
-
-    #  Generate the frequent mers for mhap
-    #
-    #    mer                     value           numInstances  totalKmers
-    #    TTTTGTTTTTTTTTTT        0.0000044602    589           132055862
-    #
-    #  The fraction is just $3/$4.  I assume this is used with "--filter-threshold 0.000005".
-
-    if (getGlobal("${tag}Overlapper") eq "mhap") {
-        my $totalMers = 0;
-        my $maxCount  = 0;
-
-        fetchFile("$path/$ofile.histogram");
-        fetchFile("$path/$ofile.histogram.info");
-
-        #  Meryl reports number of distinct canonical mers, we multiply by two to get the
-        #  (approximate) number of distinct mers.  Palindromes are counted twice, oh well.
-
-        open(F, "< $path/$ofile.histogram.info") or die "Failed to open '$path/$ofile.histogram.info' for reading: $!\n";
-        while (<F>) {
-            if (m/Found\s+(\d+)\s+mers./) {
-                $totalMers = 2 * $1;
-            }
-            if (m/Largest\s+mercount\s+is\s+(\d+)./) {
-               $maxCount = $1;
-            }
-        }
-        close(F);
-        caFailure("didn't find any mers?", "$path/$ofile.histogram.info")  if ($totalMers == 0);
-
-        my $filterThreshold = getGlobal("${tag}MhapFilterThreshold");
-        my $misRate         = 0.05;
-        my $minCovThresh    = 5.00; # should be a parameter
-        my $cov             = int($minCovThresh*getExpectedCoverage($tag, $asm));
-        my $minCount        = ($cov > int($filterThreshold * $totalMers) ? $cov : int($filterThreshold * $totalMers));
-        my $repeatThreshold = $minCount;
-        my $totalToOutput   = 0;
-        my $totalToFilter   = 0;
-        my $totalFiltered   = 0;
-
-        if (defined(getGlobal("${tag}MhapFilterUnique"))) {
-            $minCount = uniqueKmerThreshold($base, $asm, $tag, $merSize, $misRate) + 1;
-        }
-        # if the threshold was too low, update it
-        if ($cov > int($filterThreshold * $totalMers)) {
-           printf STDERR "-- For %s overlapping, the threshold %0.15f is too low, resetting to %0.15f to capture %f * %d coverage.\n", getGlobal("${tag}Overlapper"), getGlobal("${tag}MhapFilterThreshold"), ($cov / $totalMers), $minCovThresh, getExpectedCoverage($tag, $asm);
-           setGlobal("${tag}MhapFilterThreshold", $cov / $totalMers);
-        }
-
-        open(F, "< $path/$ofile.histogram") or die "Failed to open '$path/$ofile.histogram' for reading: $!\n";
-        while (<F>) {
-           my ($kCount, $occurences, $cumsum, $faction) = split '\s+', $_;
-           if ($kCount < $minCount && defined(getGlobal("${tag}MhapFilterUnique"))) {
-              $totalFiltered = $cumsum * 100;
-              $totalToFilter += $occurences;
-           }
-           if ($kCount >= $repeatThreshold) {
-              $totalToOutput += $occurences;
-           }
-        }
-        close(F);
-        $totalToOutput *= 2; # for the reverse complement
-        $totalToFilter *= 2; # for the reverse complement
-
-        fetchFile("$path/$ofile.mcdat");
-        fetchFile("$path/$ofile.mcidx");
-
-        open(F, "$bin/meryl -Dt -n $minCount -s $path/$ofile | ")    or die "Failed to run meryl to generate frequent mers $!\n";
-        open(O, "| gzip -c > $path/$ofile.frequentMers.ignore.gz")   or die "Failed to open '$path/$ofile.frequentMers.ignore.gz' for writing: $!\n";
-
-        printf(O "%d\t%d\n", $totalToFilter, $totalToOutput);
-
-        while (!eof(F)) {
-            my $h = <F>;
-            my $m = <F>;  chomp $m;
-            my $r = reverse $m;
-
-            $r =~ tr/ACGTacgt/TGCAtgca/;
-
-            if ($h =~ m/^>(\d+)/) {
-                printf(O "%s\t%e\n", $m, $1 / $totalMers);
-                printf(O "%s\t%e\n", $r, $1 / $totalMers);
-            }
-        }
-        close(O);
-        close(F);
-
-        stashFile("$path/$ffile");
-
-        if (defined(getGlobal("${tag}MhapFilterUnique"))) {
-           printf STDERR "-- For %s overlapping, filtering low-occurence k-mers < %d (%.2f\%) based on estimated error of %.2f\%.\n", getGlobal("${tag}Overlapper"), $minCount, $totalFiltered, 100*estimateError($asm, $tag, $merSize);
-        }
-        printf STDERR "-- For %s overlapping, set repeat k-mer threshold to %d.\n", getGlobal("${tag}Overlapper"),  ($cov > int($filterThreshold * $totalMers) ? $cov : int($filterThreshold * $totalMers));
-    }
-
-    #  Report the new threshold.
-
-    if ((getGlobal("${tag}Overlapper") eq "ovl") && ($merThresh > 0) && (getGlobal("${tag}OvlMerThreshold") ne $merThresh)) {
-        print STDERR "-- Reset ${tag}OvlMerThreshold from ", getGlobal("${tag}OvlMerThreshold"), " to $merThresh.\n";
-        setGlobal("${tag}OvlMerThreshold", $merThresh);
-    }
-
-  finishStage:
-    fetchFile("$path/$ofile.histogram.info");
-    fetchFile("$path/$ffile");
-
-    if (-e "$path/$ofile.histogram.info") {
-        my $numTotal    = 0;
-        my $numDistinct = 0;
-        my $numUnique   = 0;
-        my $largest     = 0;
-
-        open(F, "< $path/$ofile.histogram.info") or caFailure("can't open meryl histogram information file '$path/$ofile.histogram.info' for reading: $!\n", undef);
-        while (<F>) {
-            $numTotal    = $1   if (m/Found\s(\d+)\s+mers./);
-            $numDistinct = $1   if (m/Found\s(\d+)\s+distinct\smers./);
-            $numUnique   = $1   if (m/Found\s(\d+)\s+unique\smers./);
-            $largest     = $1   if (m/Largest\smercount\sis\s(\d+)/);
-        }
-        close(F);
-
-        print STDERR "--\n";
-        print STDERR "-- Found $numTotal $merSize-mers; $numDistinct distinct and $numUnique unique.  Largest count $largest.\n";
-
-    } elsif (-z "$path/$ffile") {
-        print STDERR "--\n";
-        print STDERR "-- Threshold zero.  No mers will be masked.\n";
-
-    } else {
-        print STDERR "--\n";
-        print STDERR "-- Using frequent mers in '", getGlobal("${tag}OvlFrequentMers"), "'\n";
-    }
-
-    unlink "$path/$ofile.mcidx"   if (getGlobal("saveMerCounts") == 0);
-    unlink "$path/$ofile.mcdat"   if (getGlobal("saveMerCounts") == 0);
-
-    emitStage($asm, "$tag-meryl");
-
-  allDone:
+    stopAfter("meryl-process");
     stopAfter("meryl");
 }

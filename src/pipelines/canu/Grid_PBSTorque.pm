@@ -35,10 +35,14 @@ require Exporter;
 @EXPORT = qw(detectPBSTorque configurePBSTorque);
 
 use strict;
+use warnings "all";
+no  warnings "uninitialized";
 
 use canu::Defaults;
 use canu::Execution;
-use canu::Grid;
+
+use canu::Grid "formatAllowedResources";
+
 
 
 sub detectPBSVersion () {
@@ -191,15 +195,12 @@ sub configurePBSTorque () {
     setGlobalIfUndef("gridEngineArrayName",                  "ARRAY_NAME");
     setGlobalIfUndef("gridEngineArrayMaxJobs",               $maxArraySize);
     setGlobalIfUndef("gridEngineOutputOption",               "-o");
-    setGlobalIfUndef("gridEngineThreadsOption",              "-l nodes=1:ppn=THREADS");
-    setGlobalIfUndef("gridEngineMemoryOption",               "-l mem=MEMORY");
-    setGlobalIfUndef("gridEnginePropagateCommand",           "qalter -W depend=afterany:\"WAIT_TAG\"");
+    setGlobalIfUndef("gridEngineResourceOption",             "-l nodes=1:ppn=THREADS:mem=MEMORY");
     setGlobalIfUndef("gridEngineNameToJobIDCommand",         "qstat -f |grep -F -B 1 WAIT_TAG | grep Id: | grep -F [] |awk '{print \$NF}'");
     setGlobalIfUndef("gridEngineNameToJobIDCommandNoArray",  "qstat -f |grep -F -B 1 WAIT_TAG | grep Id: |awk '{print \$NF}'");
     setGlobalIfUndef("gridEngineTaskID",                     "PBS_ARRAYID")           if ($isPro == 0);
     setGlobalIfUndef("gridEngineTaskID",                     "PBS_ARRAY_INDEX")       if ($isPro == 1);
-    setGlobalIfUndef("gridEngineArraySubmitID",              "\\\$PBS_ARRAYID")       if ($isPro == 0);
-    setGlobalIfUndef("gridEngineArraySubmitID",              undef)                   if ($isPro == 1);   #  Was "\\\$PBS_ARRAY_INDEX"
+    setGlobalIfUndef("gridEngineArraySubmitID",              undef);
     setGlobalIfUndef("gridEngineJobID",                      "PBS_JOBID");
 
     #  Build a list of the resources available in the grid.  This will contain a list with keys

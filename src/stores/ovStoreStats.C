@@ -29,7 +29,7 @@
 
 #include "AS_global.H"
 
-#include "gkStore.H"
+#include "sqStore.H"
 #include "ovStore.H"
 
 #include "stddev.H"
@@ -51,7 +51,7 @@
 
 int
 main(int argc, char **argv) {
-  char           *gkpName        = NULL;
+  char           *seqName        = NULL;
   char           *ovlName        = NULL;
   char           *outPrefix      = NULL;
 
@@ -73,8 +73,8 @@ main(int argc, char **argv) {
   int err=0;
   while (arg < argc) {
 
-    if      (strcmp(argv[arg], "-G") == 0)
-      gkpName = argv[++arg];
+    if      (strcmp(argv[arg], "-S") == 0)
+      seqName = argv[++arg];
 
     else if (strcmp(argv[arg], "-O") == 0)
       ovlName = argv[++arg];
@@ -140,7 +140,7 @@ main(int argc, char **argv) {
     arg++;
   }
 
-  if (gkpName == NULL)
+  if (seqName == NULL)
     err++;
   if (ovlName == NULL)
     err++;
@@ -148,7 +148,7 @@ main(int argc, char **argv) {
     err++;
 
   if (err) {
-    fprintf(stderr, "usage: %s -G gkpStore -O ovlStore -o outPrefix [-b bgnID] [-e endID] ...\n", argv[0]);
+    fprintf(stderr, "usage: %s -S seqStore -O ovlStore -o outPrefix [-b bgnID] [-e endID] ...\n", argv[0]);
     fprintf(stderr, "\n");
     fprintf(stderr, "Generates statistics for an overlap store.  By default all possible classes\n");
     fprintf(stderr, "are generated, options can disable specific classes.\n");
@@ -194,14 +194,14 @@ main(int argc, char **argv) {
 
   //  Open inputs, find limits.
 
-  gkStore    *gkpStore = gkStore::gkStore_open(gkpName);
-  ovStore    *ovlStore = new ovStore(ovlName, gkpStore);
+  sqStore    *seqStore = sqStore::sqStore_open(seqName);
+  ovStore    *ovlStore = new ovStore(ovlName, seqStore);
 
-  if (endID > gkpStore->gkStore_getNumReads())
-    endID = gkpStore->gkStore_getNumReads();
+  if (endID > seqStore->sqStore_getNumReads())
+    endID = seqStore->sqStore_getNumReads();
 
   if (endID < bgnID)
-    fprintf(stderr, "ERROR: invalid bgn/end range bgn=%u end=%u; only %u reads in the store\n", bgnID, endID, gkpStore->gkStore_getNumReads()), exit(1);
+    fprintf(stderr, "ERROR: invalid bgn/end range bgn=%u end=%u; only %u reads in the store\n", bgnID, endID, seqStore->sqStore_getNumReads()), exit(1);
 
   ovlStore->setRange(bgnID, endID);
 
@@ -256,18 +256,18 @@ main(int argc, char **argv) {
 
   //  Compute!
 
-  uint32                 overlapsMax = 1024;
-
-  uint32                 overlapsLen = 0;
-  ovOverlap             *overlaps    = ovOverlap::allocateOverlaps(gkpStore, overlapsMax);
+  uint32                 overlapsMax = 65536;
+  ovOverlap             *overlaps    = ovOverlap::allocateOverlaps(seqStore, overlapsMax);
 
   speedCounter           C("  %9.0f reads (%6.1f reads/sec)\r", 1, 100, beVerbose);
 
-  overlapsLen = ovlStore->readOverlaps(overlaps, overlapsMax);
+  for (uint32 fi=0; fi<seqStore->sqStore_getNumReads()+1; fi++) {
+    uint32  readLen     = seqStore->sqStore_getRead(fi)->sqRead_sequenceLength();
 
-  while (overlapsLen > 0) {
-    uint32  readID  = overlaps[0].a_iid;
-    uint32  readLen = gkpStore->gkStore_getRead(readID)->gkRead_sequenceLength();
+    if (readLen == 0)   //  Slight optimization; don't try to load overlaps for
+      continue;         //  reads that cannot have overlaps!
+
+    uint32  overlapsLen = ovlStore->loadOverlapsForRead(fi, overlaps, overlapsMax);
 
     intervalList<uint32>   cov;
     uint32                 covID = 0;
@@ -309,13 +309,10 @@ main(int argc, char **argv) {
       cov.add(overlaps[oo].a_bgn(), overlaps[oo].a_end() - overlaps[oo].a_bgn());
     }
 
-    //  If we filtered all the overlaps, just get out of here.  Yeah, some code duplication,
-    //  but cleaner than sticking an if block around the rest of the loop.
+    //  If we filtered all the overlaps, just get out of here.
 
     if (cov.numberOfIntervals() == 0) {
       readNoOlaps->add(readLen);
-
-      overlapsLen = ovlStore->readOverlaps(overlaps, overlapsMax);
       continue;
     }
 
@@ -346,38 +343,30 @@ main(int argc, char **argv) {
 
 
     if (readMissingMiddle == true) {
-      fprintf(LOG, "%u\t%u\t%s\n", readID, readLen, "middle-missing");
+      fprintf(LOG, "%u\t%u\t%s\n", fi, readLen, "middle-missing");
       readHole->add(readLen);
       olapHole->add(holeSize);
-
-      overlapsLen = ovlStore->readOverlaps(overlaps, overlapsMax);
       continue;
     }
 
     if ((readCoverage5 == false) && (readCoverage3 == false) && (readContained == false) && (readPartial == false)) {
-      fprintf(LOG, "%u\t%u\t%s\n", readID, readLen, "middle-only");
+      fprintf(LOG, "%u\t%u\t%s\n", fi, readLen, "middle-only");
       readHump->add(readLen);
       olapHump->add(no5Size + no3Size);
-
-      overlapsLen = ovlStore->readOverlaps(overlaps, overlapsMax);
       continue;
     }
 
     if ((readCoverage5 == false) && (readContained == false) && (readPartial == false)) {
-      fprintf(LOG, "%u\t%u\t%s\n", readID, readLen, "no-5-prime");
+      fprintf(LOG, "%u\t%u\t%s\n", fi, readLen, "no-5-prime");
       readNo5->add(readLen);
       olapNo5->add(no5Size);
-
-      overlapsLen = ovlStore->readOverlaps(overlaps, overlapsMax);
       continue;
     }
 
     if ((readCoverage3 == false) && (readContained == false) && (readPartial == false)) {
-      fprintf(LOG, "%u\t%u\t%s\n", readID, readLen, "no-3-prime");
+      fprintf(LOG, "%u\t%u\t%s\n", fi, readLen, "no-3-prime");
       readNo3->add(readLen);
       olapNo3->add(no3Size);
-
-      overlapsLen = ovlStore->readOverlaps(overlaps, overlapsMax);
       continue;
     }
 
@@ -477,7 +466,7 @@ main(int argc, char **argv) {
     //  LOG - readID readLen classification
 
     if (isLowCov) {
-      fprintf(LOG, "%u\t%u\t%s\n", readID, readLen, "low-cov");
+      fprintf(LOG, "%u\t%u\t%s\n", fi, readLen, "low-cov");
       readLowCov->add(readLen);
 
       for (uint32 ii=0; ii<depth.numberOfIntervals(); ii++)
@@ -485,7 +474,7 @@ main(int argc, char **argv) {
     }
 
     if (isUnique) {
-      fprintf(LOG, "%u\t%u\t%s\n", readID, readLen, "unique");
+      fprintf(LOG, "%u\t%u\t%s\n", fi, readLen, "unique");
       readUnique->add(readLen);
 
       for (uint32 ii=0; ii<depth.numberOfIntervals(); ii++)
@@ -493,7 +482,7 @@ main(int argc, char **argv) {
     }
 
     if ((isRepeat) && (readContained == true)) {
-      fprintf(LOG, "%u\t%u\t%s\n", readID, readLen, "contained-repeat");
+      fprintf(LOG, "%u\t%u\t%s\n", fi, readLen, "contained-repeat");
       readRepeatCont->add(readLen);
 
       for (uint32 ii=0; ii<depth.numberOfIntervals(); ii++)
@@ -501,7 +490,7 @@ main(int argc, char **argv) {
     }
 
     if ((isRepeat) && (readContained == false)) {
-      fprintf(LOG, "%u\t%u\t%s\n", readID, readLen, "dovetail-repeat");
+      fprintf(LOG, "%u\t%u\t%s\n", fi, readLen, "dovetail-repeat");
       readRepeatDove->add(readLen);
 
       for (uint32 ii=0; ii<depth.numberOfIntervals(); ii++)
@@ -509,23 +498,23 @@ main(int argc, char **argv) {
     }
 
     if (isSpanRepeat) {
-      fprintf(LOG, "%u\t%u\t%s\n", readID, readLen, "span-repeat");
+      fprintf(LOG, "%u\t%u\t%s\n", fi, readLen, "span-repeat");
       readSpanRepeat->add(readLen);
       olapSpanRepeat->add(depth.lo(endi) - depth.hi(bgni));
     }
 
     if ((isUniqRepeat) && (readContained == true)) {
-      fprintf(LOG, "%u\t%u\t%s\n", readID, readLen, "uniq-repeat-cont");
+      fprintf(LOG, "%u\t%u\t%s\n", fi, readLen, "uniq-repeat-cont");
       readUniqRepeatCont->add(readLen);
     }
 
     if ((isUniqRepeat) && (readContained == false)) {
-      fprintf(LOG, "%u\t%u\t%s\n", readID, readLen, "uniq-repeat-dove");
+      fprintf(LOG, "%u\t%u\t%s\n", fi, readLen, "uniq-repeat-dove");
       readUniqRepeatDove->add(readLen);
     }
 
     if (isUniqAnchor) {
-      fprintf(LOG, "%u\t%u\t%s\n", readID, readLen, "uniq-anchor");
+      fprintf(LOG, "%u\t%u\t%s\n", fi, readLen, "uniq-anchor");
       readUniqAnchor->add(readLen);
       olapUniqAnchor->add(depth.lo(endi) - depth.hi(bgni));
     }
@@ -533,8 +522,6 @@ main(int argc, char **argv) {
     //  Done.  Read more data.
 
     C.tick();
-
-    overlapsLen = ovlStore->readOverlaps(overlaps, overlapsMax);
   }
 
   AS_UTL_closeFile(LOG, LOGname);  //  Done with logging.
@@ -586,9 +573,9 @@ main(int argc, char **argv) {
 
   double  nReads = 0;
 
-  if (nReads < 1)  nReads = gkpStore->gkStore_getNumTrimmedReads()   / 100.0;
-  if (nReads < 1)  nReads = gkpStore->gkStore_getNumCorrectedReads() / 100.0;
-  if (nReads < 1)  nReads = gkpStore->gkStore_getNumRawReads()       / 100.0;
+  if (nReads < 1)  nReads = seqStore->sqStore_getNumTrimmedReads()   / 100.0;
+  if (nReads < 1)  nReads = seqStore->sqStore_getNumCorrectedReads() / 100.0;
+  if (nReads < 1)  nReads = seqStore->sqStore_getNumRawReads()       / 100.0;
 
   //  Write the report to somewhere.
 
@@ -661,7 +648,7 @@ main(int argc, char **argv) {
 
   delete ovlStore;
 
-  gkpStore->gkStore_close();
+  seqStore->sqStore_close();
 
   exit(0);
 }

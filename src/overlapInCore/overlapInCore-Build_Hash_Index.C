@@ -66,8 +66,8 @@
 
 #include "overlapInCore.H"
 
-#include "AS_UTL_reverseComplement.H"
-
+#include "sequence.H"
+#include "strings.H"
 
 
 //  Add string  s  as an extra hash table string and return
@@ -80,7 +80,7 @@ Add_Extra_Hash_String(const char *s) {
 
   int  len;
 
-  uint32 new_len = Used_Data_Len + G.Kmer_Len;
+  uint64 new_len = Used_Data_Len + G.Kmer_Len;
 
   if (Extra_String_Subcount < MAX_EXTRA_SUBCOUNT) {
     sub = String_Ct + Extra_String_Ct - 1;
@@ -149,10 +149,10 @@ Mark_Screened_Ends_Single(String_Ref_t ref) {
   int32 len = String_Info[s_num].length;
 
   if (getStringRefOffset(ref) < HOPELESS_MATCH)
-    String_Info[s_num].lfrag_end_screened = TRUE;
+    String_Info[s_num].lfrag_end_screened = true;
 
   if (len - getStringRefOffset(ref) - G.Kmer_Len + 1 < HOPELESS_MATCH)
-    String_Info[s_num].rfrag_end_screened = TRUE;
+    String_Info[s_num].rfrag_end_screened = true;
 }
 
 
@@ -222,67 +222,87 @@ Hash_Mark_Empty(uint64 key, char * s) {
   }  while (++ ct < HASH_TABLE_SIZE);
 
   fprintf (stderr, "ERROR:  Hash table full\n");
-  assert (FALSE);
+  assert (false);
 }
 
 
 
 //  Set  Empty  bit true for all entries in global  Hash_Table
-//  that match a kmer in file  Kmer_Skip_File .
+//  that match a kmer in file  kmerSkipFileName .
 //  Add the entry (and then mark it empty) if it's not in  Hash_Table.
 static
 void
 Mark_Skip_Kmers(void) {
-  uint64  key;
-  char  line[MAX_LINE_LEN];
-  int  ct = 0;
+  char    line[1024];
+  int32   lineNum = 0;
+  int32   kmerNum = 0;
+  uint64  key = 0;
 
-  rewind (G.Kmer_Skip_File);
+  if (G.kmerSkipFileName == NULL)
+    return;
 
-  while (fgets (line, MAX_LINE_LEN, G.Kmer_Skip_File) != NULL) {
-    int  i, len;
+  //fprintf(stderr, "\n");
+  //fprintf(stderr, "Loading kmers to skip.\n");
+  //fprintf(stderr, "\n");
+  //fprintf(stderr, "String_Ct             = " F_U64 "\n", String_Ct);
+  //fprintf(stderr, "Extra_String_Ct       = " F_U64 "\n", Extra_String_Ct);
+  //fprintf(stderr, "Extra_String_Subcount = " F_U64 "\n", Extra_String_Subcount);
+  //fprintf(stderr, "\n");
 
-    ct ++;
-    len = strlen (line) - 1;
-    if (line[0] != '>' || line[len] != '\n') {
-      fprintf (stderr, "ERROR:  Bad line %d in kmer skip file\n", ct);
-      fputs (line, stderr);
-      exit (1);
+  FILE *F = AS_UTL_openInputFile(G.kmerSkipFileName);
+
+  while (fgets(line, 1024, F) != NULL) {
+    lineNum++;
+
+    if (line[0] == '>') {
+      fgets(line, 1024, F);
+      lineNum++;
     }
 
-    if (fgets (line, MAX_LINE_LEN, G.Kmer_Skip_File) == NULL) {
-      fprintf (stderr, "ERROR:  Bad line after %d in kmer skip file\n", ct);
-      exit (1);
-    }
-    ct ++;
-    len = strlen (line) - 1;
-    if (len != G.Kmer_Len || line[len] != '\n') {
-      fprintf (stderr, "ERROR:  Bad line %d in kmer skip file\n", ct);
-      fputs (line, stderr);
-      exit (1);
-    }
-    line[len] = '\0';
+    for (int32 ii=0; line[ii]; ii++)
+      if ((line[ii] == ' ') ||
+          (line[ii] == '\t') ||
+          (line[ii] == '\n') ||
+          (line[ii] == '\r'))
+        line[ii] = 0;
 
-    //if ((ct % 200000) == 0)
-    //  fprintf(stderr, "Loaded skip %10d '%s'\n", ct/2, line);
+    int32  len = strlen(line);
+
+    if (len != G.Kmer_Len)
+      fprintf(stderr, "Short kmer skip kmer '%s' at line %d, expecting length %d got length %d.\n",
+              line, lineNum, (int32)G.Kmer_Len, len), exit(1);
 
     key = 0;
-    for (i = 0;  i < len;  i ++) {
-      line[i] = tolower (line[i]);
-      key |= (uint64) (Bit_Equivalent[(int) line[i]]) << (2 * i);
-    }
-    Hash_Mark_Empty (key, line);
 
-    reverseComplementSequence (line, len);
+    for (int32 ii=0; ii<len; ii++)
+      line[ii] = tolower(line[ii]);
+
+    for (int32 ii=0; ii<len; ii++)
+      key |= (uint64)(Bit_Equivalent[(int32)line[ii]]) << (2 * ii);
+
+    Hash_Mark_Empty(key, line);
+
+    reverseComplementSequence(line, len);
+
     key = 0;
-    for (i = 0;  i < len;  i ++)
-      key |= (uint64) (Bit_Equivalent[(int) line[i]]) << (2 * i);
-    Hash_Mark_Empty (key, line);
+
+    for (int32 ii=0; ii<len; ii++)
+      key |= (uint64)(Bit_Equivalent[(int) line[ii]]) << (2 * ii);
+
+    Hash_Mark_Empty(key, line);
+
+    kmerNum++;
   }
 
-  fprintf (stderr, "String_Ct = " F_U64 "  Extra_String_Ct = " F_U64 "  Extra_String_Subcount = " F_U64 "\n",
-           String_Ct, Extra_String_Ct, Extra_String_Subcount);
-  fprintf (stderr, "Read %d kmers to mark to skip\n", ct / 2);
+  AS_UTL_closeFile(F, G.kmerSkipFileName);
+
+  //  BPW has no idea what these are.
+  //fprintf(stderr, "String_Ct             = " F_U64 "\n", String_Ct);
+  //fprintf(stderr, "Extra_String_Ct       = " F_U64 "\n", Extra_String_Ct);
+  //fprintf(stderr, "Extra_String_Subcount = " F_U64 "\n", Extra_String_Subcount);
+  fprintf(stderr, "\n");
+  fprintf(stderr, "Read %d kmers to mark to skip\n", kmerNum);
+  fprintf(stderr, "\n");
 }
 
 
@@ -346,7 +366,7 @@ Hash_Insert(String_Ref_t Ref, uint64 Key, char * S) {
   }  while (++ Ct < HASH_TABLE_SIZE);
 
   fprintf (stderr, "ERROR:  Hash table full\n");
-  assert (FALSE);
+  assert (false);
 }
 
 
@@ -436,11 +456,12 @@ Put_String_In_Hash(uint32 UNUSED(curID), uint32 i) {
 
 // Read the next batch of strings from  stream  and create a hash
 //  table index of their  G.Kmer_Len -mers.  Return  1  if successful;
-//  0 otherwise.  The batch ends when either end-of-file is encountered
-//  or  Max_Hash_Strings  have been read in.   first_frag_id  is the
+//  0 otherwise.
+//
+//  first_frag_id  is the
 //  internal ID of the first fragment in the hash table.
 int
-Build_Hash_Index(gkStore *gkpStore, uint32 bgnID, uint32 endID) {
+Build_Hash_Index(sqStore *seqStore, uint32 bgnID, uint32 endID) {
   String_Ref_t  ref;
   uint64  total_len;
   uint64   hash_entry_limit;
@@ -472,14 +493,6 @@ Build_Hash_Index(gkStore *gkpStore, uint32 bgnID, uint32 endID) {
   Hash_Entries     = 0;
   hash_entry_limit = G.Max_Hash_Load * HASH_TABLE_SIZE * ENTRIES_PER_BUCKET;
 
-#if 0
-  fprintf(stderr, "HASH LOADING STARTED: fragID   %12" F_U64P "\n", first_frag_id);
-  fprintf(stderr, "HASH LOADING STARTED: strings  %12" F_U64P " out of %12" F_U64P " max.\n", String_Ct, G.Max_Hash_Strings);
-  fprintf(stderr, "HASH LOADING STARTED: length   %12" F_U64P " out of %12" F_U64P " max.\n", total_len, G.Max_Hash_Data_Len);
-  fprintf(stderr, "HASH LOADING STARTED: entries  %12" F_U64P " out of %12" F_U64P " max (load %.2f).\n", Hash_Entries, hash_entry_limit,
-         (100.0 * Hash_Entries) / (HASH_TABLE_SIZE * ENTRIES_PER_BUCKET));
-#endif
-
   //  Compute an upper limit on the number of bases we will load.  The number of Hash_Entries
   //  can't be computed here, so the real loop below could end earlier than expected - and we
   //  don't use a little bit of memory.
@@ -491,27 +504,27 @@ Build_Hash_Index(gkStore *gkpStore, uint32 bgnID, uint32 endID) {
   uint64  maxAlloc = 0;
   uint32  curID    = 0;  //  The last ID loaded into the hash
 
-  for (curID=bgnID; ((String_Ct <  G.Max_Hash_Strings) &&
-                     (total_len <  G.Max_Hash_Data_Len) &&
+  for (curID=bgnID; ((total_len <  G.Max_Hash_Data_Len) &&
                      (curID     <= endID)); curID++) {
-    gkRead *read = gkpStore->gkStore_getRead(curID);
+    sqRead *read = seqStore->sqStore_getRead(curID);
 
-    if ((read->gkRead_libraryID() < G.minLibToHash) ||
-        (read->gkRead_libraryID() > G.maxLibToHash)) {
+    if ((read->sqRead_libraryID() < G.minLibToHash) ||
+        (read->sqRead_libraryID() > G.maxLibToHash)) {
       nSkipped++;
       continue;
     }
 
-    if (read->gkRead_sequenceLength() < G.Min_Olap_Len) {
+    if (read->sqRead_sequenceLength() < G.Min_Olap_Len) {
       nShort++;
       continue;
     }
 
     nLoadable++;
 
-    maxAlloc += read->gkRead_sequenceLength() + 1;
+    maxAlloc += read->sqRead_sequenceLength() + 1;
   }
 
+  fprintf(stderr, "\n");
   fprintf(stderr, "Found " F_U32 " reads with length " F_U64 " to load; " F_U32 " skipped by being too short; " F_U32 " skipped per library restriction\n",
           nLoadable, maxAlloc, nShort, nSkipped);
 
@@ -531,10 +544,11 @@ Build_Hash_Index(gkStore *gkpStore, uint32 bgnID, uint32 endID) {
 
   memset(nextRef, 0xff, sizeof(String_Ref_t) * nextRef_Len);
 
-  gkReadData   *readData = new gkReadData;
+  sqReadData   *readData = new sqReadData;
 
-  for (curID=bgnID; ((String_Ct    <  G.Max_Hash_Strings) &&
-                     (total_len    <  G.Max_Hash_Data_Len) &&
+  //  Every read must have an entry in the table, otherwise
+
+  for (curID=bgnID; ((total_len    <  G.Max_Hash_Data_Len) &&
                      (Hash_Entries <  hash_entry_limit) &&
                      (curID        <= endID)); curID++, String_Ct++) {
 
@@ -544,32 +558,32 @@ Build_Hash_Index(gkStore *gkpStore, uint32 bgnID, uint32 endID) {
     String_Start[String_Ct]                    = UINT64_MAX;
 
     String_Info[String_Ct].length              = 0;
-    String_Info[String_Ct].lfrag_end_screened  = TRUE;
-    String_Info[String_Ct].rfrag_end_screened  = TRUE;
+    String_Info[String_Ct].lfrag_end_screened  = true;
+    String_Info[String_Ct].rfrag_end_screened  = true;
 
-    gkRead  *read = gkpStore->gkStore_getRead(curID);
+    sqRead  *read = seqStore->sqStore_getRead(curID);
 
-    if ((read->gkRead_libraryID() < G.minLibToHash) ||
-        (read->gkRead_libraryID() > G.maxLibToHash))
+    if ((read->sqRead_libraryID() < G.minLibToHash) ||
+        (read->sqRead_libraryID() > G.maxLibToHash))
       continue;
 
-    uint32 len = read->gkRead_sequenceLength();
+    uint32 len = read->sqRead_sequenceLength();
 
     if (len < G.Min_Olap_Len)
       continue;
 
-    gkpStore->gkStore_loadReadData(read, readData);
+    seqStore->sqStore_loadReadData(read, readData);
 
-    char   *seqptr   = readData->gkReadData_getSequence();
-    uint8  *qltptr   = readData->gkReadData_getQualities();
+    char   *seqptr   = readData->sqReadData_getSequence();
+    uint8  *qltptr   = readData->sqReadData_getQualities();
 
     //  Note where we are going to store the string, and how long it is
 
     String_Start[String_Ct]                    = total_len;
 
     String_Info[String_Ct].length              = len;
-    String_Info[String_Ct].lfrag_end_screened  = FALSE;
-    String_Info[String_Ct].rfrag_end_screened  = FALSE;
+    String_Info[String_Ct].lfrag_end_screened  = false;
+    String_Info[String_Ct].rfrag_end_screened  = false;
 
     //  Store it.
 
@@ -603,18 +617,16 @@ Build_Hash_Index(gkStore *gkpStore, uint32 bgnID, uint32 endID) {
 
     if ((String_Ct % 100000) == 0)
       fprintf (stderr, "String_Ct:%12" F_U64P "/%12" F_U32P "  totalLen:%12" F_U64P "/%12" F_U64P "  Hash_Entries:%12" F_U64P "/%12" F_U64P "  Load: %.2f%%\n",
-               String_Ct,    G.Max_Hash_Strings,
+               String_Ct,    G.endHashID - G.bgnHashID + 1,
                total_len,    G.Max_Hash_Data_Len,
                Hash_Entries,
                hash_entry_limit,
                100.0 * Hash_Entries / (HASH_TABLE_SIZE * ENTRIES_PER_BUCKET));
   }
 
-  curID--;  //  We always stop on the read after we loaded.
-
   delete readData;
 
-  fprintf(stderr, "HASH LOADING STOPPED: strings  %12" F_U64P " out of %12" F_U32P " max.\n", String_Ct, G.Max_Hash_Strings);
+  fprintf(stderr, "HASH LOADING STOPPED: curID    %12" F_U32P " out of %12" F_U32P "\n", curID-1, G.endHashID);
   fprintf(stderr, "HASH LOADING STOPPED: length   %12" F_U64P " out of %12" F_U64P " max.\n", total_len, G.Max_Hash_Data_Len);
   fprintf(stderr, "HASH LOADING STOPPED: entries  %12" F_U64P " out of %12" F_U64P " max (load %.2f).\n", Hash_Entries, hash_entry_limit,
           100.0 * Hash_Entries / (HASH_TABLE_SIZE * ENTRIES_PER_BUCKET));
@@ -629,7 +641,7 @@ Build_Hash_Index(gkStore *gkpStore, uint32 bgnID, uint32 endID) {
   //fprintf(stderr, "Extra_Ref_Ct = " F_U64 "  Max_Extra_Ref_Space = " F_U64 "\n", Extra_Ref_Ct, Max_Extra_Ref_Space);
 
   if (Extra_Ref_Ct > Max_Extra_Ref_Space) {
-    int32          newSize  = (Max_Extra_Ref_Space == 0) ? 16 * 1024 : Max_Extra_Ref_Space * 2;
+    int64          newSize  = (Max_Extra_Ref_Space == 0) ? 16 * 1024 : Max_Extra_Ref_Space * 2;
 
     while (newSize < Extra_Ref_Ct)
       newSize *= 2;
@@ -645,8 +657,7 @@ Build_Hash_Index(gkStore *gkpStore, uint32 bgnID, uint32 endID) {
   }
 
 
-  if (G.Kmer_Skip_File != NULL)
-    Mark_Skip_Kmers();
+  Mark_Skip_Kmers();
 
 
   // Coalesce reference chain into adjacent entries in  Extra_Ref_Space
@@ -666,5 +677,5 @@ Build_Hash_Index(gkStore *gkpStore, uint32 bgnID, uint32 endID) {
       }
     }
 
-  return(curID);
+  return(curID - 1);  //  Return the ID of the last read loaded.
 }

@@ -20,6 +20,10 @@
  #      are a 'United States Government Work', and
  #      are released in the public domain
  #
+ #    Sergey Koren beginning on 2018-OCT-11
+ #      are a 'United States Government Work', and
+ #      are released in the public domain
+ #
  #  File 'README.licenses' in the root directory of this distribution contains
  #  full conditions and disclaimers for each license.
  ##
@@ -32,7 +36,7 @@ my $cwd = getcwd();
 
 my $label    = "snapshot";     #  Automagically set to 'release' for releases.
 my $major    = "1";            #  Bump before release.
-my $minor    = "7";            #  Bump before release.
+my $minor    = "8";            #  Bump before release.
 
 my $commits  = "0";
 my $hash1    = undef;          #  This from 'git describe'
@@ -123,8 +127,10 @@ if      (defined($dirty)) {
     print F "#define CANU_VERSION           \"Canu snapshot v$major.$minor +$commits changes (r$revCount $hash1)\\n\"\n";
 } elsif (defined($hash1)) {
     print F "#define CANU_VERSION           \"Canu snapshot ($hash1)\\n\"\n";
-} else {
+} elsif ($label  =~ m/release/) {
     print F "#define CANU_VERSION           \"Canu $major.$minor\\n\"\n";
+} else {
+    print F "#define CANU_VERSION           \"Canu snapshot ($label)\\n\"\n";
 }
 
 close(F);

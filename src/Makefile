@@ -363,6 +363,18 @@ ifeq (${OSTYPE}, SunOS)
   endif
 endif
 
+#  Some filesystems cannot use < or > in file names, but for reasons unknown
+#  (or, at least, reasons we're not going to admit to), files in the overlap
+#  store are named ####<###>.  Enabling POSIX_FILE_NAMES Will change the
+#  names to ####.###.
+#
+#  Be aware this will break object store compatibility.
+#
+ifeq ($(POSIX_FILE_NAMES), 1)
+  CXXFLAGS += -DPOSIX_FILE_NAMES
+endif
+
+
 #  Set compiler and flags based on discovered hardware
 #
 #  By default, debug symbols are included in all builds (even optimized).
@@ -399,21 +411,73 @@ ifeq (${OSTYPE}, Linux)
 endif
 
 
+#  The default MacOS compiler - even as of 10.13 High Sierra - doesn't support OpenMP.
+#  Clang 6.0 installed from MacPorts supports OpenMP, but fails to compile Canu.
+#  So, we require gcc7 (from MacPorts) or gcc8 (from hommebrew).
+#
+#  If from MacPorts:
+#    port install gcc7
+#    port select gcc mp-gcc7
+#
+#  If CC is set to 'cc', the GNU make default, we'll automagically search for other
+#  versions and use those if found, preferring gcc7 over gcc8.
+#
+#  There' definitely a clever way to do this with 'foreach', but my Make is lacking.
+#
 ifeq (${OSTYPE}, Darwin)
-  CC       ?= gcc
-  CXX      ?= g++
+  ifeq ($(CC), cc)
+    CC7    := $(shell echo `which gcc-mp-7`)
+    CXX7   := $(shell echo `which g++-mp-7`)
 
-  CLANG = $(shell echo `${CXX} --version 2>&1 | grep -c clang`)
-
-  ifeq ($(CLANG), 0)
-     CXXFLAGS += -D_GLIBCXX_PARALLEL -fopenmp
-     LDFLAGS  += -D_GLIBCXX_PARALLEL -fopenmp
-  else
-     CXXFLAGS += -DBROKEN_CLANG_OpenMP
-     LDFLAGS  += 
+    ifdef CXX7
+      CC  := $(CC7)
+      CXX := $(CXX7)
+    endif
   endif
 
-  CXXFLAGS += -pthread -fPIC -m64 -Wall -Wextra -Wno-write-strings -Wno-unused -Wno-char-subscripts -Wno-sign-compare -Wformat
+  ifeq ($(CC), cc)
+    CC8    := $(shell echo `which gcc-7`)
+	  CXX8   := $(shell echo `which g++-7`)
+
+    ifdef CXX8
+      CC  := $(CC8)
+      CXX := $(CXX8)
+    endif
+  endif
+
+  ifeq ($(CC), cc)
+    CC8    := $(shell echo `which gcc-8`)
+	  CXX8   := $(shell echo `which g++-8`)
+
+    ifdef CXX8
+      CC  := $(CC8)
+      CXX := $(CXX8)
+    endif
+  endif
+
+  ifneq ($(shell echo `$(CXX) --version 2>&1 | grep -c clang`), 0)
+     CPATH := $(shell echo `which $(CXX)`)
+     CLANG := $(shell echo `$(CXX) --version 2>&1 | grep clang`)
+     space := 
+
+     $(warning )
+     ifeq ($(CXX), $(CPATH))
+       $(warning Compiler '$(CXX)' reports version '$(CLANG)'.)
+     else
+       $(warning Compiler '$(CXX)' at '$(CPATH)' reports version '$(CLANG)'.)
+     endif
+     $(warning )
+     $(warning Canu cannot be compiled with this compiler.  Please install GCC and/or)
+     $(warning specify a non-Clang compiler on the command line, e.g.,)   #  Quite the evil trick to get
+     $(warning $(space)    make CC=/path/to/gcc CXX=/path/to/g++);        #  this line indented!
+     $(warning )
+     $(error unsupported compiler)
+  endif
+
+  CXXFLAGS += -D_GLIBCXX_PARALLEL -fopenmp
+  LDFLAGS  += -D_GLIBCXX_PARALLEL -fopenmp
+
+  CXXFLAGS += -pthread -fPIC -m64 -Wall -Wextra -Wno-write-strings -Wno-unused -Wno-char-subscripts -Wno-sign-compare -Wno-format-truncation -Wformat
   LDFLAGS  += -pthread -lm
 
   ifeq ($(BUILDOPTIMIZED), 1)
@@ -430,19 +494,20 @@ endif
 
 ifeq (${OSTYPE}, FreeBSD)
 ifeq (${MACHINETYPE}, amd64)
-  CC       ?= gcc48
-  CXX      ?= g++48
+  CC       ?= gcc6
+  CXX      ?= g++6
+  CCLIB    ?= -rpath /usr/local/lib/gcc6
 
   #  GCC
   CXXFLAGS  += -I/usr/local/include -D_GLIBCXX_PARALLEL -pthread -fopenmp -fPIC
-  LDFLAGS   += -L/usr/local/lib     -D_GLIBCXX_PARALLEL -pthread -fopenmp -rpath /usr/local/lib/gcc48 -lm -lexecinfo
+  LDFLAGS   += -L/usr/local/lib     -D_GLIBCXX_PARALLEL -pthread -fopenmp ${CCLIB} -lm -lexecinfo
 
   #  CLANG
   #CXXFLAGS  += -I/usr/local/include -D_GLIBCXX_PARALLEL -pthread -fPIC
   #LDFLAGS   += -L/usr/local/lib     -D_GLIBCXX_PARALLEL -pthread -lm -lexecinfo -lgomp
 
   #CXXFLAGS  += -Wall -Wextra -Wformat  -Wno-unused   -Wno-parentheses
-  CXXFLAGS  += -Wall -Wextra -Wformat -Wno-unused-function -Wno-unused-parameter -Wno-unused-variable -Wno-char-subscripts -Wno-write-strings -Wno-sign-compare
+  CXXFLAGS  += -Wall -Wextra -Wformat -Wno-unused-function -Wno-unused-parameter -Wno-unused-variable -Wno-char-subscripts -Wno-write-strings -Wno-sign-compare -Wno-format-truncation
 
   #  Google Performance Tools malloc and heapchecker (HEAPCHECK=normal)
   #CXXFLAGS  +=
@@ -579,14 +644,13 @@ endif
 
 #  But, if we we have an old GCC, stack tracing support isn't there.
 
-GCC_45 := $(shell expr `${CC} -dumpversion | sed -e 's/\.\([0-9][0-9]\)/\1/g' -e 's/\.\([0-9]\)/0\1/g' -e 's/^[0-9]\{3,4\}$$/&00/'` \>= 40500)
-GCC_VV := $(shell ${CC} -dumpversion)
+GXX_45 := $(shell expr `${CXX} -dumpversion | sed -e 's/\.\([0-9][0-9]\)/\1/g' -e 's/\.\([0-9]\)/0\1/g' -e 's/^[0-9]\{3,4\}$$/&00/'` \>= 40500)
 GXX_VV := $(shell ${CXX} -dumpversion)
 
 ifeq (${BUILDSTACKTRACE}, 1)
-ifeq (${GCC_45}, 0)
+ifeq (${GXX_45}, 0)
 $(info WARNING:)
-$(info WARNING: GCC ${GCC_VV} detected, disabling stack trace support.  Please upgrade to GCC 4.7 or higher.)
+$(info WARNING: ${CXX} ${GXX_VV} detected, disabling stack trace support.  Please upgrade to GCC 4.7 or higher.)
 $(info WARNING:)
 BUILDSTACKTRACE = 0
 endif
@@ -613,7 +677,6 @@ INCDIRS := $(addprefix -I,$(call CANONICAL_PATH,${INCDIRS}))
 all: UPDATE_VERSION MAKE_DIRS \
      $(addprefix ${TARGET_DIR}/,${ALL_TGTS}) \
      ${TARGET_DIR}/bin/canu \
-     ${TARGET_DIR}/bin/trioCanu \
      ${TARGET_DIR}/bin/canu.defaults \
      ${TARGET_DIR}/share/java/classes/mhap-2.1.3.jar \
      ${TARGET_DIR}/lib/site_perl/canu/Consensus.pm \
@@ -621,9 +684,8 @@ all: UPDATE_VERSION MAKE_DIRS \
      ${TARGET_DIR}/lib/site_perl/canu/HaplotypeReads.pm \
      ${TARGET_DIR}/lib/site_perl/canu/Configure.pm \
      ${TARGET_DIR}/lib/site_perl/canu/Defaults.pm \
-     ${TARGET_DIR}/lib/site_perl/canu/ErrorEstimate.pm \
      ${TARGET_DIR}/lib/site_perl/canu/Execution.pm \
-     ${TARGET_DIR}/lib/site_perl/canu/Gatekeeper.pm \
+     ${TARGET_DIR}/lib/site_perl/canu/SequenceStore.pm \
      ${TARGET_DIR}/lib/site_perl/canu/Grid.pm \
      ${TARGET_DIR}/lib/site_perl/canu/Grid_Cloud.pm \
      ${TARGET_DIR}/lib/site_perl/canu/Grid_DNANexus.pm \
@@ -688,10 +750,6 @@ ${TARGET_DIR}/bin/canu: pipelines/canu.pl
 	cp -pf pipelines/canu.pl ${TARGET_DIR}/bin/canu
 	chmod +x ${TARGET_DIR}/bin/canu
 
-${TARGET_DIR}/bin/trioCanu: pipelines/trioCanu.pl
-	cp -pf pipelines/trioCanu.pl ${TARGET_DIR}/bin/trioCanu
-	chmod +x ${TARGET_DIR}/bin/trioCanu
-
 ${TARGET_DIR}/bin/canu.defaults:
 	echo > ${TARGET_DIR}/bin/canu.defaults  "# Add site specific options (for setting up Grid or limiting memory/threads) here."
 	chmod -x ${TARGET_DIR}/bin/canu.defaults
@@ -720,8 +778,8 @@ ${TARGET_DIR}/lib/site_perl/canu/ErrorEstimate.pm: pipelines/canu/ErrorEstimate.
 ${TARGET_DIR}/lib/site_perl/canu/Execution.pm: pipelines/canu/Execution.pm
 	cp -pf pipelines/canu/Execution.pm ${TARGET_DIR}/lib/site_perl/canu/
 
-${TARGET_DIR}/lib/site_perl/canu/Gatekeeper.pm: pipelines/canu/Gatekeeper.pm
-	cp -pf pipelines/canu/Gatekeeper.pm ${TARGET_DIR}/lib/site_perl/canu/
+${TARGET_DIR}/lib/site_perl/canu/SequenceStore.pm: pipelines/canu/SequenceStore.pm
+	cp -pf pipelines/canu/SequenceStore.pm ${TARGET_DIR}/lib/site_perl/canu/
 
 ${TARGET_DIR}/lib/site_perl/canu/Grid.pm: pipelines/canu/Grid.pm
 	cp -pf pipelines/canu/Grid.pm ${TARGET_DIR}/lib/site_perl/canu/
@@ -774,10 +832,17 @@ ${TARGET_DIR}/lib/site_perl/canu/Report.pm: pipelines/canu/Report.pm
 ${TARGET_DIR}/lib/site_perl/canu/Unitig.pm: pipelines/canu/Unitig.pm
 	cp -pf pipelines/canu/Unitig.pm ${TARGET_DIR}/lib/site_perl/canu/
 
+.PHONY: dnanexus
+dnanexus:
+	mkdir -p dx-canu/resources
+	rm -rf dx-canu/resources/usr
+	cp -rp ${TARGET_DIR} dx-canu/resources/usr
+	dx build dx-canu -f
+
 #  Makefile processed.  Report that we're starting the build.
 
-$(info Building for '${OSTYPE}' '${OSVERSION}' as '${MACHINETYPE}' into '${DESTDIR}${PREFIX}/$(OSTYPE)-$(MACHINETYPE)/{bin,obj}')
-$(info CC  ${CC} ${GCC_VV})
-$(info CXX ${CXX} ${GXX_VV})
+$(info Building for '${OSTYPE}' '${OSVERSION}' as '${MACHINETYPE}' into '${DESTDIR}${PREFIX}/$(OSTYPE)-$(MACHINETYPE)/{bin,obj}'.)
+$(info Using '$(shell which ${CXX})' version '$(shell ${CXX} -dumpversion)'.)
+$(info )
 
 #${info Using LD_RUN_PATH '${LD_RUN_PATH}'}

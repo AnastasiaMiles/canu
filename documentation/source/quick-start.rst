@@ -18,14 +18,16 @@ Input sequences can be FASTA or FASTQ format, uncompressed or compressed with gz
 (.bz2) or xz (.xz).  Note that zip files (.zip) are not supported.
 
 Canu can resume incomplete assemblies, allowing for recovery from system outages or other abnormal
-terminations.
+terminations.  On each restart of Canu, it will examine the files in the assembly directory to
+decide what to do next.  For example, if all but two overlap tasks have finished, only the two that
+are missing will be computed.  For best results, do not change Canu parameters between restarts.
 
 Canu will auto-detect computational resources and scale itself to fit, using all of the resources
 available and are reasonable for the size of your assembly.  Memory and processors can be explicitly
 limited with with parameters :ref:`maxMemory <maxMemory>` and :ref:`maxThreads <maxThreads>`.  See section :ref:`execution`
 for more details.
 
-Canu will automaticall take full advantage of any LSF/PBS/PBSPro/Torque/Slrum/SGE grid available,
+Canu will automatically take full advantage of any LSF/PBS/PBSPro/Torque/Slrum/SGE grid available,
 even submitting itself for execution.  Canu makes heavy use of array jobs and requires job
 submission from compute nodes, which are sometimes not available or allowed.  Canu option
 ``useGrid=false`` will restrict Canu to using only the current machine, while option
@@ -77,7 +79,7 @@ For Nanopore::
 
 
 Output and intermediate files will be in directories 'ecoli-pacbio' and 'ecoli-nanopore',
-respectively.  Intermeditate files are written in directories 'correction', 'trimming' and
+respectively.  Intermediate files are written in directories 'correction', 'trimming' and
 'unitigging' for the respective stages.  Output files are named using the '-p' prefix, such as
 'ecoli.contigs.fasta', 'ecoli.contigs.gfa', etc.  See section :ref:`outputs` for more details on
 outputs (intermediate files aren't documented).
@@ -92,7 +94,7 @@ file::
 
  curl -L -o mix.tar.gz http://gembox.cbcb.umd.edu/mhap/raw/ecoliP6Oxford.tar.gz
  tar xvzf mix.tar.gz
- 
+
  canu \
   -p ecoli -d ecoli-mix \
   genomeSize=4.8m \
@@ -105,7 +107,7 @@ Correct, Trim and Assemble, Manually
 
 Sometimes, however, it makes sense to do the three top-level tasks by hand.  This would allow trying
 multiple unitig construction parameters on the same set of corrected and trimmed reads, or skipping
-trimming and assembly if you only want correced reads.
+trimming and assembly if you only want corrected reads.
 
 We'll use the PacBio reads from above.  First, correct the raw reads::
 
@@ -145,7 +147,7 @@ Assembling Low Coverage Datasets
 
 We claimed Canu works down to 20X coverage, and we will now assemble `a 20X subset of S. cerevisae
 <http://gembox.cbcb.umd.edu/mhap/raw/yeast_filtered.20x.fastq.gz>`_ (215 MB).  When assembling, we
-adjust :ref:`correctedErrorRate <correctedErrorRate>` to accomodate the slightly lower
+adjust :ref:`correctedErrorRate <correctedErrorRate>` to accommodate the slightly lower
 quality corrected reads::
 
  curl -L -o yeast.20x.fastq.gz http://gembox.cbcb.umd.edu/mhap/raw/yeast_filtered.20x.fastq.gz
@@ -166,14 +168,23 @@ Canu has support for using parental short-read sequencing to classify and bin th
  curl -L -o O157.parental.fasta https://gembox.cbcb.umd.edu/triobinning/example/o157.12.fasta
  curl -L -o F1.fasta https://gembox.cbcb.umd.edu/triobinning/example/pacbio.fasta
 
- trioCanu \
+ canu \
   -p asm -d ecoliTrio \
   genomeSize=5m \
   -haplotypeK12 K12.parental.fasta \
   -haplotypeO157 O157.parental.fasta \
   -pacbio-raw F1.fasta
 
-The run will produce two assemblies, ecoliTrio/haplotypeK12/asm.contigs.fasta and ecoliTrio/haplotypeO157/asm.contigs.fasta. As comparison, you can try co-assembling the datasets instead::
+The run will first bin the reads into the haplotypes (``ecoliTrio/haplotype/haplotype-*.fasta.gz``) and provide a summary of the classification in ``ecoliTrio/haplotype/haplotype.log``::
+
+  -- Processing reads in batches of 100 reads each.
+  --
+  --   119848 reads    378658103 bases written to haplotype file ./haplotype-K12.fasta.gz.
+  --   308353 reads   1042955878 bases written to haplotype file ./haplotype-O157.fasta.gz.
+  --     4114 reads      6520294 bases written to haplotype file ./haplotype-unknown.fasta.gz.
+
+
+Next, the haplotypes are assembled in ``ecoliTrio/asm-haplotypeK12/asm-haplotypeK12.contigs.fasta`` and ``ecoliTrio/asm-haplotypeO157/asm-haplotypeO157.contigs.fasta``. As comparison, you can try co-assembling the datasets instead::
 
  canu \
   -p asm -d ecoliHap \
@@ -181,11 +192,7 @@ The run will produce two assemblies, ecoliTrio/haplotypeK12/asm.contigs.fasta an
   corOutCoverage=200 "batOptions=-dg 3 -db 3 -dr 1 -ca 500 -cp 50" \
  -pacbio-raw F1.fasta
 
-and compare the contiguity/accuracy. The current version of trioCanu is not yet optimized for memory use so requires adjusted parameters for large genomes. Adding the options::
-
-  gridOptionsExecutive="--mem=250g" griodOptionsMeryl='--partition=largemem --mem=1000g'
-
-should be sufficient for a mammalian genome.
+and compare the continuity/accuracy. 
 
 Consensus Accuracy
 -------------------

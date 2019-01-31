@@ -40,9 +40,12 @@ package canu::Defaults;
 require Exporter;
 
 @ISA    = qw(Exporter);
-@EXPORT = qw(getCommandLineOptions addCommandLineOption addCommandLineError writeLog getNumberOfCPUs getPhysicalMemorySize diskSpace printOptions printHelp printCitation addSequenceFile setParametersFromFile setParametersFromCommandLine checkJava checkGnuplot checkParameters getGlobal setGlobal setGlobalIfUndef setDefaults setVersion);
+@EXPORT = qw(getCommandLineOptions addCommandLineOption removeHaplotypeOptions addCommandLineError writeLog getNumberOfCPUs getPhysicalMemorySize diskSpace printOptions printHelp printCitation addSequenceFile setParametersFromFile setParametersFromCommandLine checkJava checkMinimap checkGnuplot checkParameters getGlobal setGlobal setGlobalIfUndef setDefaults setVersion);
 
 use strict;
+use warnings "all";
+no  warnings "uninitialized";
+
 use Cwd qw(getcwd abs_path);
 use Carp qw(cluck);
 use Sys::Hostname;
@@ -53,7 +56,7 @@ my %global;    #  Parameter value
 my %synops;    #  Parameter description (for -defaults)
 my %synnam;    #  Parameter name (beacuse the key is lowercase)
 
-my $cLineOpts = undef;
+my @cLineOpts;
 my $specLog   = "";
 
 
@@ -139,7 +142,6 @@ sub setGlobal ($$) {
                      "ovlmersize",
                      "ovlmerthreshold",
                      "ovlmerdistinct",
-                     "ovlmertotal",
                      "ovlfrequentmers") {
         $set += setGlobalSpecialization($val, ("cor${opt}", "obt${opt}", "utg${opt}"))  if ($var eq "${opt}");
     }
@@ -210,7 +212,9 @@ sub setGlobalIfUndef ($$) {
 
 
 sub getCommandLineOptions () {
-    return($cLineOpts);
+    my $cLineOpts = join ' ', @cLineOpts;
+
+    return((wantarray) ? @cLineOpts : $cLineOpts);
 }
 
 
@@ -220,8 +224,47 @@ sub addCommandLineOption ($) {
 
     return   if ($opt =~ m/canuIteration=/);   #  Ignore canu resetting canuIteration
 
-    $cLineOpts .= " "   if (defined($cLineOpts) && ($cLineOpts !~ m/\s$/));
-    $cLineOpts .= $opt;
+    push @cLineOpts, $opt;
+    #$cLineOpts .= " "   if (defined($cLineOpts) && ($cLineOpts !~ m/\s$/));
+    #$cLineOpts .= $opt;
+}
+
+
+
+sub removeHaplotypeOptions () {
+    my @strippedOpts;
+    my $setUpForPacBio    = 0;
+    my $setUpForNanopore  = 0;
+    my $haveRaw           = 0;
+    my $haveCorrected     = 0;
+
+    #  A very specialized function.  Remove all the sequence file options,
+    #  both long reads and short reads used for haplotyping, from the list of
+    #  command line options.  Then return a string appropriate for adding new
+    #  long reads.
+    #
+    #  Note that when this is called a second (third, etc) time, the
+    #  semantics are different (no haplotype options to remove) but the end
+    #  result is the same.
+
+    foreach my $opt (@cLineOpts) {
+        if ($opt =~ m/^-pacbio-raw\s/)          { $setUpForPacBio++;   $haveRaw++;       next; }
+        if ($opt =~ m/^-pacbio-corrected\s/)    { $setUpForPacBio++;   $haveCorrected++; next; }
+        if ($opt =~ m/^-nanopore-raw\s/)        { $setUpForNanopore++; $haveRaw++;       next; }
+        if ($opt =~ m/^-nanopore-corrected\s/)  { $setUpForNanopore++; $haveCorrected++; next; }
+        if ($opt =~ m/^-haplotype/)             {                                        next; }
+        if ($opt =~ m/^-d\s/)                   {                                        next; }
+        if ($opt =~ m/^-p\s/)                   {                                        next; }
+
+        push @strippedOpts, $opt;
+    }
+
+    my $tech = ($setUpForNanopore > 0) ? "-nanopore"  : "-pacbio";
+    my $type = ($haveCorrected    > 0) ? "-corrected" : "-raw";
+
+    @cLineOpts = @strippedOpts;
+
+    return("$tech$type");
 }
 
 
@@ -354,12 +397,13 @@ sub printHelp (@) {
 
     print "\n";
     print "usage:   canu [-version] [-citation] \\\n";
-    print "              [-correct | -trim | -assemble | -trim-assemble] \\\n";
+    print "              [-haplotype | -correct | -trim | -assemble | -trim-assemble] \\\n";
     print "              [-s <assembly-specifications-file>] \\\n";
     print "               -p <assembly-prefix> \\\n";
     print "               -d <assembly-directory> \\\n";
     print "               genomeSize=<number>[g|m|k] \\\n";
     print "              [other-options] \\\n";
+    print "              [-haplotype{NAME} illumina.fastq.gz] \\\n";
     print "              [-pacbio-raw |\n";
     print "               -pacbio-corrected |\n";
     print "               -nanopore-raw |\n";
@@ -369,6 +413,7 @@ sub printHelp (@) {
     print "\n";
     print "\n";
     print "  To restrict canu to only a specific stage, use:\n";
+    print "    -haplotype     - generate haplotype-specific reads\n";
     print "    -correct       - generate corrected reads\n";
     print "    -trim          - generate trimmed reads\n";
     print "    -assemble      - generate an assembly\n";
@@ -405,6 +450,12 @@ sub printHelp (@) {
     print "  A full list of options can be printed with '-options'.  All options can be supplied in\n";
     print "  an optional sepc file with the -s option.\n";
     print "\n";
+    print "  For TrioCanu, haplotypes are specified with the -haplotype{NAME} option, with any\n";
+    print "  number of haplotype-specific Illumina read files after.  The {NAME} of each haplotype\n";
+    print "  is free text (but only letters and numbers, please).  For example:\n";
+    print "    -haplotypeNANNY nanny/*gz\n";
+    print "    -haplotypeBILLY billy1.fasta.gz billy2.fasta.gz\n";
+    print "\n";
     print "  Reads can be either FASTA or FASTQ format, uncompressed, or compressed with gz, bz2 or xz.\n";
     print "  Reads are specified by the technology they were generated with, and any processing performed:\n";
     print "    -pacbio-raw         <files>      Reads are straight off the machine.\n";
@@ -432,6 +483,11 @@ sub printCitation ($) {
     print STDERR "${prefix}Genome Res. 2017 May;27(5):722-736.\n";
     print STDERR "${prefix}http://doi.org/10.1101/gr.215087.116\n";
     print STDERR "${prefix}\n";
+    print STDERR "${prefix}Koren S, Rhie A, Walenz BP, Dilthey AT, Bickhart DM, Kingan SB, Hiendleder S, Williams JL, Smith TPL, Phillippy AM.\n";
+    print STDERR "${prefix}De novo assembly of haplotype-resolved genomes with trio binning.\n";
+    print STDERR "${prefix}Nat Biotechnol. 2018\n";
+    print STDERR "${prefix}https//doi.org/10.1038/nbt.4277\n";
+    print STDERR "${prefix}\n";
     print STDERR "${prefix}Read and contig alignments during correction, consensus and GFA building use:\n";
     print STDERR "${prefix}  Šošic M, Šikic M.\n";
     print STDERR "${prefix}  Edlib: a C/C ++ library for fast, exact sequence alignment using edit distance.\n";
@@ -439,21 +495,35 @@ sub printCitation ($) {
     print STDERR "${prefix}  http://doi.org/10.1093/bioinformatics/btw753\n";
     print STDERR "${prefix}\n";
     print STDERR "${prefix}Overlaps are generated using:\n";
-    print STDERR "${prefix}  Berlin K, et al.\n";
-    print STDERR "${prefix}  Assembling large genomes with single-molecule sequencing and locality-sensitive hashing.\n";
-    print STDERR "${prefix}  Nat Biotechnol. 2015 Jun;33(6):623-30.\n";
-    print STDERR "${prefix}  http://doi.org/10.1038/nbt.3238\n";
-    print STDERR "${prefix}\n";
-    print STDERR "${prefix}  Myers EW, et al.\n";
-    print STDERR "${prefix}  A Whole-Genome Assembly of Drosophila.\n";
-    print STDERR "${prefix}  Science. 2000 Mar 24;287(5461):2196-204.\n";
-    print STDERR "${prefix}  http://doi.org/10.1126/science.287.5461.2196\n";
-    print STDERR "${prefix}\n";
-    print STDERR "${prefix}  Li H.\n";
-    print STDERR "${prefix}  Minimap and miniasm: fast mapping and de novo assembly for noisy long sequences.\n";
-    print STDERR "${prefix}  Bioinformatics. 2016 Jul 15;32(14):2103-10.\n";
-    print STDERR "${prefix}  http://doi.org/10.1093/bioinformatics/btw152\n";
-    print STDERR "${prefix}\n";
+    if (getGlobal("corOverlapper") eq "mhap" || getGlobal("obtOverlapper") eq "mhap" || getGlobal("utgOverlapper") eq "mhap") {
+       print STDERR "${prefix}  Berlin K, et al.\n";
+       print STDERR "${prefix}  Assembling large genomes with single-molecule sequencing and locality-sensitive hashing.\n";
+       print STDERR "${prefix}  Nat Biotechnol. 2015 Jun;33(6):623-30.\n";
+       print STDERR "${prefix}  http://doi.org/10.1038/nbt.3238\n";
+       print STDERR "${prefix}\n";
+    }
+    if (getGlobal("corOverlapper") eq "ovl" || getGlobal("obtOverlapper") eq "ovl" || getGlobal("utgOverlapper") eq "ovl") {
+       print STDERR "${prefix}  Myers EW, et al.\n";
+       print STDERR "${prefix}  A Whole-Genome Assembly of Drosophila.\n";
+       print STDERR "${prefix}  Science. 2000 Mar 24;287(5461):2196-204.\n";
+       print STDERR "${prefix}  http://doi.org/10.1126/science.287.5461.2196\n";
+       print STDERR "${prefix}\n";
+    }
+    if (getGlobal("corOverlapper") eq "minimap" || getGlobal("obtOverlapper") eq "minimap" || getGlobal("utgOverlapper") eq "minimap") {
+       print STDERR "${prefix}  Li H.\n";
+       print STDERR "${prefix}  Minimap2: pairwise alignment for nucleotide sequences.\n";
+       print STDERR "${prefix}  arXiv.org. 2017 Aug 4.\n";
+       print STDERR "${prefix}  https://arxiv.org/abs/1708.01492\n";
+       print STDERR "${prefix}\n";
+    }
+    if (getGlobal("unitigger") eq "wtdbg") {
+       print STDERR "${prefix}Contigs are constructed use:\n";
+       print STDERR "${prefix}  Ruan J.\n";
+       print STDERR "${prefix}  WTDBG A fuzzy Bruijn graph (FBG) approach to long noisy reads assembly.\n";
+       print STDERR "${prefix}  https://github.com/ruanjue/wtdbg\n";
+       print STDERR "${prefix}\n";
+    }
+
     print STDERR "${prefix}Corrected read consensus sequences are generated using an algorithm derived from FALCON-sense:\n";
     print STDERR "${prefix}  Chin CS, et al.\n";
     print STDERR "${prefix}  Phased diploid genome assembly with single-molecule real-time sequencing.\n";
@@ -470,13 +540,12 @@ sub printCitation ($) {
 
 
 
-
 sub makeAbsolute ($) {
     my $var = shift @_;
     my $val = getGlobal($var);
     my $abs = abs_path($val);
 
-    if (defined($val) && ($val != $abs)) {
+    if (defined($val) && ($val ne $abs)) {
         setGlobal($var, $abs);
         $val =~ s/\\\"/\"/g;
         $val =~ s/\"/\\\"/g;
@@ -506,14 +575,52 @@ sub addSequenceFile ($$@) {
     my $file  = shift @_;
     my $err   = shift @_;
 
-    return(undef)             if (!defined($file));   #  No file name?  Nothing to do.
-    $file = "$dir/$file"      if (defined($dir));     #  If $dir defined, assume file is in there.
-    return($file)             if (substr($file, 0, 1) eq "/");     #  If already a full path, use that.
-    return(abs_path($file))   if (-e $file);          #  If found, return the full path.
+    #  If no file name, nothing to do.
+    if (!defined($file)) {
+        return(undef);
+    }
 
-    #  And if not found, report an error, unless told not to.  This is because on the command
-    #  line, the first word after -pacbio-raw must exist, but all the other words could
-    #  be files or options.
+    #  If $dir is defined, assume the file is relative to it.
+    if (defined($dir)) {
+        $file = "$dir/$file";
+    }
+
+    #  If the name is already a full path, use that.
+    if (substr($file, 0, 1) eq "/") {
+        return($file);
+    }
+
+    #  If the file exists in a relative path, make it a full path.
+    if (-e $file) {
+        return(abs_path($file));
+    }
+
+    #  If the file exists in object storage, accept it as is.  Well, except
+    #  we can't test this until we complete setup -- in particular, until we
+    #  setup grids -- but we can't do that until we parse the command line,
+    #  and we can't parse the command line without deciding if a parameter
+    #  is a file or an option!
+    #
+    #  So, the best we can do is test if this file _looks_ like it might
+    #  be a pointer to one in an object store.  This must be done _after_
+    #  we try making relative paths into full paths above, otherwise
+    #  we don't file full paths for files with :'s in the name!
+
+    #if (objectStoreFileExists($file)) {
+    #    return($file);
+    #}
+
+    if ($file =~ m/^project-.*:file-\w+/) {
+        return($file);
+    }
+    if ($file =~ m/^\w+:\w+/) {
+        return($file);
+    }
+
+    #  Otherwise, not found.  Report an error, unless told not to.  This is
+    #  because on the command line, the first word after -pacbio-raw must
+    #  exist, but all the other words could be files or options (and we use
+    #  this function to test if they're files or options).
 
     addCommandLineError("ERROR: Input read file '$file' not found.\n")  if (defined($err));
 
@@ -682,23 +789,22 @@ sub setOverlapDefaults ($$$) {
 
     setOverlapDefault($tag, "OvlHashBlockLength",  undef,                     "Amount of sequence (bp) to load into the overlap hash table");
     setOverlapDefault($tag, "OvlRefBlockLength",   undef,                     "Amount of sequence (bp) to search against the hash table per batch");
-    setOverlapDefault($tag, "OvlHashBits",         ($tag eq "cor") ? 18 : 23, "Width of the kmer hash.  Width 22=1gb, 23=2gb, 24=4gb, 25=8gb.  Plus 10b per ${tag}OvlHashBlockLength");
-    setOverlapDefault($tag, "OvlHashLoad",         0.75,                      "Maximum hash table load.  If set too high, table lookups are inefficent; if too low, search overhead dominates run time; default 0.75");
+    setOverlapDefault($tag, "OvlHashBits",         undef,                     "Width of the kmer hash.  Width 22=1gb, 23=2gb, 24=4gb, 25=8gb.  Plus 10b per ${tag}OvlHashBlockLength");
+    setOverlapDefault($tag, "OvlHashLoad",         0.80,                      "Maximum hash table load.  If set too high, table lookups are inefficent; if too low, search overhead dominates run time; default 0.75");
     setOverlapDefault($tag, "OvlMerSize",          ($tag eq "cor") ? 19 : 22, "K-mer size for seeds in overlaps");
-    setOverlapDefault($tag, "OvlMerThreshold",     "auto",                    "K-mer frequency threshold; mers more frequent than this count are ignored; default 'auto'");
+    setOverlapDefault($tag, "OvlMerThreshold",     undef,                     "K-mer frequency threshold; mers more frequent than this count are ignored");
     setOverlapDefault($tag, "OvlMerDistinct",      undef,                     "K-mer frequency threshold; the least frequent fraction of distinct mers can seed overlaps");
-    setOverlapDefault($tag, "OvlMerTotal",         undef,                     "K-mer frequency threshold; the least frequent fraction of all mers can seed overlaps");
     setOverlapDefault($tag, "OvlFrequentMers",     undef,                     "Do not seed overlaps with these kmers (fasta format)");
     setOverlapDefault($tag, "OvlFilter",           undef,                     "Filter overlaps based on expected kmers vs observed kmers");
 
     #  Mhap parameters.  FilterThreshold MUST be a string, otherwise it gets printed in scientific notation (5e-06) which java doesn't understand.
 
     setOverlapDefault($tag, "MhapVersion",         "2.1.3",                   "Version of the MHAP jar file to use");
-    setOverlapDefault($tag, "MhapFilterThreshold", "0.000005",                "Value between 0 and 1. kmers which comprise more than this percentage of the input are downweighted");
+    setOverlapDefault($tag, "MhapFilterThreshold", "0.0000001",               "Value between 0 and 1. kmers which comprise more than this percentage of the input are downweighted");
     setOverlapDefault($tag, "MhapFilterUnique",    undef,                     "Expert option: True or false, supress the low-frequency k-mer distribution based on them being likely noise and not true overlaps. Threshold auto-computed based on error rate and coverage.");
     setOverlapDefault($tag, "MhapNoTf",            undef,                     "Expert option: True or false, do not use tf weighting, only idf of tf-idf.");
     setOverlapDefault($tag, "MhapOptions",         undef,                     "Expert option: free-form parameters to pass to MHAP.");
-    setOverlapDefault($tag, "MhapBlockSize",       3000,                      "Number of reads per 1GB; memory * blockSize = the size of  block loaded into memory per job");
+    setOverlapDefault($tag, "MhapBlockSize",       3000,                      "Number of reads per GB of memory allowed (mhapMemory)");
     setOverlapDefault($tag, "MhapMerSize",         ($tag eq "cor") ? 16 : 16, "K-mer size for seeds in mhap");
     setOverlapDefault($tag, "MhapOrderedMerSize",  ($tag eq "cor") ? 12 : 18, "K-mer size for second-stage filter in mhap");
     setOverlapDefault($tag, "MhapSensitivity",     undef,                     "Coarse sensitivity level: 'low', 'normal' or 'high'.  Set automatically based on coverage; 'high' <= 30x < 'normal' < 60x <= 'low'");
@@ -745,14 +851,19 @@ sub setDefaults () {
 
     my $java = (exists $ENV{"JAVA_HOME"} && -e "$ENV{'JAVA_HOME'}/bin/java") ? "$ENV{'JAVA_HOME'}/bin/java" : "java";
 
-    setDefault("showNext",            undef,     "Don't run any commands, just report what would run");
-    setDefault("shell",               "/bin/sh", "Command interpreter to use; sh-compatible (e.g., bash), NOT C-shell (csh or tcsh); default '/bin/sh'");
-    setDefault("java",                $java,     "Java interpreter to use; at least version 1.8; default 'java'");
-    setDefault("gnuplot",             "gnuplot", "Path to the gnuplot executable");
-    setDefault("gnuplotImageFormat",  undef,     "Image format that gnuplot will generate.  Default: based on gnuplot, 'png', 'svg' or 'gif'");
-    setDefault("gnuplotTested",       0,         "If set, skip the initial testing of gnuplot");
-    setDefault("stageDirectory",      undef,     "If set, copy heavily used data to this node-local location");
-    setDefault("preExec",             undef,     "A command line to run at the start of Canu execution scripts");
+    setDefault("showNext",            undef,      "Don't run any commands, just report what would run");
+    setDefault("shell",               "/bin/sh",  "Command interpreter to use; sh-compatible (e.g., bash), NOT C-shell (csh or tcsh); default '/bin/sh'");
+
+    setDefault("minimap",             "minimap2", "Path to minimap2; default 'minimap2'");
+
+    setDefault("java",                $java,      "Java interpreter to use; at least version 1.8; default 'java'");
+    setDefault("javaUse64Bit",        undef,      "Java interpreter supports the -d64 or -d32 flags; default auto");
+
+    setDefault("gnuplot",             "gnuplot",  "Path to the gnuplot executable");
+    setDefault("gnuplotImageFormat",  undef,      "Image format that gnuplot will generate.  Default: based on gnuplot, 'png', 'svg' or 'gif'");
+
+    setDefault("stageDirectory",      undef,      "If set, copy heavily used data to this node-local location");
+    setDefault("preExec",             undef,      "A command line to run at the start of Canu execution scripts");
 
     #####  Cleanup and Termination options
 
@@ -778,18 +889,22 @@ sub setDefaults () {
 
     #####  Minimums and maximums
 
-    setDefault("minReadLength",    1000, "Reads shorter than this length are not loaded into the assembler; default 1000");
-    setDefault("minOverlapLength",  500, "Overlaps shorter than this length are not computed; default 500");
+    setDefault("minReadLength",        1000,      "Reads shorter than this length are not loaded into the assembler; default 1000");
+    setDefault("minOverlapLength",     500,       "Overlaps shorter than this length are not computed; default 500");
 
-    setDefault("minMemory",        undef, "Minimum amount of memory needed to compute the assembly (do not set unless prompted!)");
-    setDefault("maxMemory",        undef, "Maximum memory to use by any component of the assembler");
+    setDefault("readSamplingBias",     0.0,       "Score reads as 'random * length^bias', keep the highest scoring reads");
+    setDefault("readSamplingCoverage", undef,     "Discard reads to make the input be of this size");
 
-    setDefault("minThreads",       undef, "Minimum number of compute threads suggested to compute the assembly");
-    setDefault("maxThreads",       undef, "Maximum number of compute threads to use by any component of the assembler");
+    setDefault("minMemory",            undef,     "Minimum amount of memory needed to compute the assembly (do not set unless prompted!)");
+    setDefault("maxMemory",            undef,     "Maximum memory to use by any component of the assembler");
+
+    setDefault("minThreads",           undef,     "Minimum number of compute threads suggested to compute the assembly");
+    setDefault("maxThreads",           undef,     "Maximum number of compute threads to use by any component of the assembler");
 
     #####  Stopping conditions
 
-    setDefault("stopOnReadQuality", 1,     "Stop if a significant portion of the input data is too short or has quality value or base composition errors");
+    setDefault("stopOnReadQuality", 0,     "Stop if a significant portion of the input data is too short or has quality value or base composition errors");
+    setDefault("stopOnLowCoverage", 10,    "Stop if raw, corrected or trimmed read coverage is low");
     setDefault("stopAfter",         undef, "Stop after a specific algorithm step is completed");
 
     #####  Grid Engine configuration, internal parameters.  These are filled out in canu.pl, right after this function returns.
@@ -801,9 +916,9 @@ sub setDefaults () {
     setDefault("gridEngineArrayName",                 undef, "Grid engine configuration, not documented");
     setDefault("gridEngineArrayMaxJobs",              undef, "Grid engine configuration, not documented");
     setDefault("gridEngineOutputOption",              undef, "Grid engine configuration, not documented");
-    setDefault("gridEnginePropagateCommand",          undef, "Grid engine configuration, not documented");
     setDefault("gridEngineThreadsOption",             undef, "Grid engine configuration, not documented");
     setDefault("gridEngineMemoryOption",              undef, "Grid engine configuration, not documented");
+    setDefault("gridEngineResourceOption",            undef, "Grid engine configuration, not documented");
     setDefault("gridEngineMemoryUnits",               undef, "Grid engine configuration, not documented");
     setDefault("gridEngineNameToJobIDCommand",        undef, "Grid engine configuration, not documented");
     setDefault("gridEngineNameToJobIDCommandNoArray", undef, "Grid engine configuration, not documented");
@@ -816,7 +931,7 @@ sub setDefaults () {
 
     setDefault("useGrid", 1, "If 'true', enable grid-based execution; if 'false', run all jobs on the local machine; if 'remote', create jobs for grid execution but do not submit; default 'true'");
 
-    foreach my $c (qw(BAT GFA CNS COR MERYL CORMHAP CORMMAP COROVL OBTMHAP OBTMMAP OBTOVL OEA OVB OVS RED UTGMHAP UTGMMAP UTGOVL)) {
+    foreach my $c (qw(BAT GFA CNS COR MERYL HAP CORMHAP CORMMAP COROVL OBTMHAP OBTMMAP OBTOVL OEA OVB OVS RED UTGMHAP UTGMMAP UTGOVL)) {
         setDefault("useGrid$c", 1, "If 'true', run module $c under grid control; if 'false' run locally.");
     }
 
@@ -828,36 +943,38 @@ sub setDefaults () {
 
     #####  Grid Engine configuration and parameters, for each step of the pipeline (memory, threads)
 
-    setExecDefaults("meryl",   "mer counting");
-    setExecDefaults("cor",     "read correction");
+    setExecDefaults("meryl",     "mer counting");
+    setExecDefaults("hap",       "haplotype assignment");
+    setExecDefaults("cor",       "read correction");
 
-    setExecDefaults("corovl",  "overlaps for correction");
-    setExecDefaults("obtovl",  "overlaps for trimming");
-    setExecDefaults("utgovl",  "overlaps for unitig construction");
+    setExecDefaults("corovl",    "overlaps for correction");
+    setExecDefaults("obtovl",    "overlaps for trimming");
+    setExecDefaults("utgovl",    "overlaps for unitig construction");
 
-    setExecDefaults("cormhap", "mhap overlaps for correction");
-    setExecDefaults("obtmhap", "mhap overlaps for trimming");
-    setExecDefaults("utgmhap", "mhap overlaps for unitig construction");
+    setExecDefaults("cormhap",   "mhap overlaps for correction");
+    setExecDefaults("obtmhap",   "mhap overlaps for trimming");
+    setExecDefaults("utgmhap",   "mhap overlaps for unitig construction");
 
-    setExecDefaults("cormmap", "mmap overlaps for correction");
-    setExecDefaults("obtmmap", "mmap overlaps for trimming");
-    setExecDefaults("utgmmap", "mmap overlaps for unitig construction");
+    setExecDefaults("cormmap",   "mmap overlaps for correction");
+    setExecDefaults("obtmmap",   "mmap overlaps for trimming");
+    setExecDefaults("utgmmap",   "mmap overlaps for unitig construction");
 
-    setExecDefaults("ovb",     "overlap store bucketizing");
-    setExecDefaults("ovs",     "overlap store sorting");
+    setExecDefaults("ovb",       "overlap store bucketizing");
+    setExecDefaults("ovs",       "overlap store sorting");
 
-    setExecDefaults("red",     "read error detection");
-    setExecDefaults("oea",     "overlap error adjustment");
+    setExecDefaults("red",       "read error detection");
+    setExecDefaults("oea",       "overlap error adjustment");
 
-    setExecDefaults("bat",     "unitig construction");
-    setExecDefaults("cns",     "unitig consensus");
-    setExecDefaults("gfa",     "graph alignment and processing");
+    setExecDefaults("bat",       "unitig construction");
+    setExecDefaults("cns",       "unitig consensus");
+    setExecDefaults("gfa",       "graph alignment and processing");
 
     #####  Object Storage
 
     setDefault("objectStore",          undef,  "Type of object storage used; not ready for production yet");
     setDefault("objectStoreClient",    undef,  "Path to the command line client used to access the object storage");
     setDefault("objectStoreNameSpace", undef,  "Object store parameters; specific to the type of objectStore used");
+    setDefault("objectStoreProject",   undef,  "Object store project; specific to the type of objectStore used");
 
     #####  Overlapper
 
@@ -867,13 +984,24 @@ sub setDefaults () {
 
     ##### Overlap Store
 
-    setDefault("ovsMethod", undef, "Use the 'sequential' or 'parallel' algorithm for constructing an overlap store; default 'sequential'");
+    #  ovbMemory and ovsMemory are set above.
+
+    #####  Executive
+
+    setDefault("executiveMemory",   4,   "Amount of memory, in GB, to reserve for the Canu exective process");
+    setDefault("executiveThreads",  1,   "Number of threads to reserve for the Canu exective process");
 
     #####  Mers
 
     setDefault("merylMemory",      undef,  "Amount of memory, in gigabytes, to use for mer counting");
     setDefault("merylThreads",     undef,  "Number of threads to use for mer counting");
     setDefault("merylConcurrency", undef,  "Unused, there is only one process");
+
+    #####  Haplotyping
+
+    setDefault("hapMemory",      undef,  "Amount of memory, in gigabytes, to use for haplotype assignment");
+    setDefault("hapThreads",     undef,  "Number of threads to use for haplotype assignment");
+    setDefault("hapConcurrency", undef,  "Unused, there is only one process");
 
     #####  Overlap Based Trimming
 
@@ -894,12 +1022,16 @@ sub setDefaults () {
 
     #####  Unitigger & BOG & bogart Options
 
-    setDefault("unitigger",      "bogart", "Which unitig algorithm to use; only 'bogart' supported; default 'bogart'");
+    setDefault("unitigger",      "bogart", "Which unitig algorithm to use; 'bogart' or 'wtdbg' supported; default 'bogart'");
     setDefault("genomeSize",     undef, "An estimate of the size of the genome");
     setDefault("batOptions",     undef, "Advanced options to bogart");
     setDefault("batMemory",      undef, "Approximate maximum memory usage, in gigabytes, default is the maxMemory limit");
     setDefault("batThreads",     undef, "Number of threads to use; default is the maxThreads limit");
     setDefault("batConcurrency", undef, "Unused, only one process supported");
+    setDefault("dbgOptions",     undef, "Advanced options to wtdbg");
+    setDefault("dbgMemory",      undef, "Approximate maximum memory usage, in gigabytes, default is the maxMemory limit");
+    setDefault("dbgThreads",     undef, "Number of threads to use; default is the maxThreads limit");
+    setDefault("dbgConcurrency", undef, "Unused, only one process supported");
 
     setDefault("contigFilter",   "2 0 1.0 0.5 3",   "Parameters to filter out 'unassembled' unitigs.  Five values: minReads minLength singleReadSpan lowCovFraction lowCovDepth");
 
@@ -936,14 +1068,6 @@ sub setDefaults () {
         $global{$l} = $global{$k};         #  Otherwise, set the lowercase option and
         delete $global{$k};                #  delete the uppercase version
     }
-
-    #  If this is set, it breaks the consensus.sh and overlap.sh scripts.  Good grief!  Why
-    #  are you running this in a task array!?
-
-    if (exists($ENV{getGlobal("gridEngineTaskID")})) {
-        undef $ENV{getGlobal("gridEngineTaskID")};
-        print STDERR "ENV: ", getGlobal("gridEngineTaskID"), " needs to be unset, done.\n";
-    }
 }
 
 
@@ -953,7 +1077,7 @@ sub setVersion ($) {
     my $bin    = shift @_;
     my $version;
 
-    open(F, "$bin/gatekeeperCreate --version 2>&1 |");
+    open(F, "$bin/sqStoreCreate --version 2>&1 |");
     while (<F>) {
         $version = $_;  chomp $version;
     }
@@ -968,67 +1092,148 @@ sub checkJava () {
                 (getGlobal("obtOverlapper") ne "mhap") &&
                 (getGlobal("utgOverlapper") ne "mhap"));
 
-    my $java       = getGlobal("java");
-    my $versionStr = "unknown";
-    my $version    = 0;
+    my $java         = getGlobal("java");
+    my $javaUse64Bit = getGlobal("javaUse64Bit");
+    my $versionStr   = "unknown";
+    my $version      = 0;
+    my @javaVersionStrings;
 
-    #  Argh, we can't use runCommand() here, because we're included in Execution.pm.  Try to check
-    #  it with -x.  Nope.  Fails if $java == "java".
-
-    #if (! -x $java) {
-    #    addCommandLineError("ERROR:  java executable '$java' not found or not executable\n");
-    #}
-
-    open(F, "$java -Xmx1g -showversion 2>&1 |");
-    while (<F>) {
-        #  First word is either "java" or "openjdk" or ...
-        if (m/^.*\s+version\s+\"(\d+.\d+)(.*)\".*$/) {
-            $versionStr = "$1$2";
-            $version    =  $1;
-        }
+    if ($java =~ m/^\./) {
+        addCommandLineError("ERROR:  path to java '$java' must not be a relative path.\n");
     }
-    close(F);
 
-    if ($version < 1.8) {
-        addCommandLineError("ERROR:  mhap overlapper requires java version at least 1.8.0; you have $versionStr (from '$java').\n");
-        addCommandLineError("ERROR:  '$java -showversion' reports:\n");
+    #  We've seen errors running just this tiny java if too many copies are ran at the same time.
+    #  So, run it twice, if needed, with a little random delay between.
 
+    for (my $iter=0; $iter<2; $iter++) {
         open(F, "$java -Xmx1g -showversion 2>&1 |");
-        while (<F>) {
-            chomp;
-            addCommandLineError("ERROR:    '$_'\n");
+        @javaVersionStrings = <F>;
+        chomp @javaVersionStrings;
+        close(F);
+
+        foreach (@javaVersionStrings) {
+            #  First word is either "java" or "openjdk" or ...
+            if (m/^.*\s+version\s+\"(\d+\.*\d*)(.*)\".*$/) {
+                $versionStr = "$1$2";
+                $version    =  $1;
+            }
+            if (m/-d64/) {
+               setGlobal("javaUse64Bit", 1);
+            }
         }
         close(F);
 
+        last  if ($version >= 1.8);
+
+        print STDERR "-- Failed Java version check.\n";
+        print STDERR "--   '$javaVersionStrings[0]'\n"  if (length($javaVersionStrings[0]) > 0);
+        print STDERR "--   '$javaVersionStrings[1]'\n"  if (length($javaVersionStrings[1]) > 0);
+        print STDERR "--   '$javaVersionStrings[2]'\n"  if (length($javaVersionStrings[2]) > 0);
+        print STDERR "--   '$javaVersionStrings[3]'\n"  if (length($javaVersionStrings[3]) > 0);
+        print STDERR "--\n";
+        print STDERR "-- Trying again.\n";
+        print STDERR "--\n";
+
+        sleep(int(rand(3)+1));
+    }
+    setGlobal("javaUse64Bit",  0) if (!defined(getGlobal("javaUse64Bit")));
+
+    if ($version < 1.8) {
+        addCommandLineError("ERROR:  mhap overlapper requires java version at least 1.8.0; you have $versionStr (from '$java').\n");
+        addCommandLineError("ERROR:  '$java -Xmx1g -showversion' reports:\n");
+
+        for (my $ii=0; (($ii<20) && ($ii < scalar(@javaVersionStrings))); $ii++) {
+            addCommandLineError("ERROR:    '$javaVersionStrings[$ii]'\n");
+        }
+
     } else {
-        print STDERR "-- Detected Java(TM) Runtime Environment '$versionStr' (from '$java').\n";
+        print STDERR "-- Detected Java(TM) Runtime Environment '$versionStr' (from '$java')";
+        print STDERR (defined(getGlobal("javaUse64Bit")) && getGlobal("javaUse64Bit") == 1) ? " with " : " without ";
+        print STDERR "-d64 support.\n";
     }
 }
 
 
 
-sub checkGnuplot () {
-
-    return  if (getGlobal("gnuPlotTested") == 1);
-
-    my $gnuplot = getGlobal("gnuplot");
-    my $format  = getGlobal("gnuplotImageFormat");
+sub checkMinimap ($) {
+    my $minimap = getGlobal("minimap");
     my $version = undef;
 
-    #  Check for existence of gnuplot.
+    return  if ((getGlobal("corOverlapper") ne "minimap") &&
+                (getGlobal("obtOverlapper") ne "minimap") &&
+                (getGlobal("utgOverlapper") ne "minimap"));
 
-    open(F, "$gnuplot -V |");
+    if ($minimap =~ m/^\./) {
+        addCommandLineError("ERROR:  path to minimap2 '$minimap' must not be a relative path.\n");
+        goto cleanupMinimap;
+    }
+
+    system("cd /tmp && $minimap --version > /tmp/minimap2-$$.err 2>&1");
+
+    open(F, "< /tmp/minimap2-$$.err");
     while (<F>) {
-        chomp;
-        $version = $_;
-        $version = $1  if ($version =~ m/^gnuplot\s+(.*)$/);
+        $version = $1  if ($_ =~ m/^(2.*$)/);
     }
     close(F);
 
     if (!defined($version)) {
-        addCommandLineError("ERROR:  Failed to run gnuplot from '$gnuplot'.");
-        addCommandLineError("ERROR:  Set option gnuplot=<path-to-gnuplot> or gnuplotTested=true to skip this test and not generate plots.\n");
-        return;
+        addCommandlineError("ERROR:  failed to run minimap2 using command '$minimap'.\n");
+        goto cleanupMinimap;
+    }
+
+    print STDERR "-- Detected minimap2 version '$version' (from '$minimap').\n";
+
+ cleanupMinimap:
+    unlink "/tmp/minimap2-$$.err";
+}
+
+
+
+sub checkGnuplot () {
+    my $gnuplot = getGlobal("gnuplot");
+    my $format  = getGlobal("gnuplotImageFormat");
+    my $version = undef;
+
+    if (($gnuplot eq undef) ||
+        ($gnuplot eq "")) {
+        print STDERR "-- No path to gnuplot executable.  Plots disabled.\n";
+        goto cleanupGnuplot;
+    }
+
+    if ($gnuplot =~ m/^\./) {
+        addCommandLineError("ERROR:  path to gnuplot '$gnuplot' must not be a relative path.\n");
+        goto cleanupGnuplot;
+    }
+
+    #  Explicitly set pager to avoid having output corrupted by "Press enter..."
+
+    $ENV{"PAGER"} = "cat";
+
+    #  Check for existence of gnuplot.
+
+    open(F, "> /tmp/gnuplot-$$-test.gp");
+    print F "show version long\n";
+    print F "set terminal\n";
+    close(F);
+
+    system("cd /tmp && $gnuplot < /dev/null /tmp/gnuplot-$$-test.gp > /tmp/gnuplot-$$-test.err 2>&1");
+
+    open(F, "< /tmp/gnuplot-$$-test.err");
+    while (<F>) {
+        $version = $1  if ($_ =~ m/^\s*[vV]ersion\s+(.*)/);
+        $version = $1  if ($_ =~ m/^\s*[vV]ersion\s+(.*)\s+last/);
+    }
+    close(F);
+
+    if (!defined($version)) {
+        print STDERR "--\n";
+        print STDERR "-- WARNING:\n";
+        print STDERR "-- WARNING:  Failed to run gnuplot using command '$gnuplot'.\n";
+        print STDERR "-- WARNING:  Plots will be disabled.\n";
+        print STDERR "-- WARNING:\n";
+        print STDERR "--\n";
+
+        goto cleanupGnuplot;
     }
 
     #  Check for existence of a decent output format.  Need to redirect in /dev/null to make gnuplot
@@ -1038,12 +1243,6 @@ sub checkGnuplot () {
         my $havePNG = 0;
         my $haveSVG = 0;
         my $haveGIF = 0;
-
-        open(F, "> /tmp/gnuplot-$$-test.gp");
-        print F "set terminal\n";
-        close(F);
-
-        system("cd /tmp && $gnuplot < /dev/null /tmp/gnuplot-$$-test.gp > /tmp/gnuplot-$$-test.err 2>&1");
 
         open(F, "< /tmp/gnuplot-$$-test.err");
         while (<F>) {
@@ -1063,16 +1262,18 @@ sub checkGnuplot () {
         $format = "png"   if ($havePNG);
 
         setGlobal("gnuplotImageFormat", $format);
-
-        unlink "/tmp/gnuplot-$$-test.gp";
-        unlink "/tmp/gnuplot-$$-test.err";
     }
 
     if (!defined($format)) {
-        addCommandLineError("ERROR:  Failed to detect a suitable output format for gnuplot.\n");
-        addCommandLineError("ERROR:  Looked for png, svg and gif, found none of them.\n");
-        addCommandLineError("Set option gnuplotImageFormat=<type>, or gnuplotTested=true to skip this test and not generate plots.\n");
-        return;
+        print STDERR "--\n";
+        print STDERR "-- WARNING:\n";
+        print STDERR "-- WARNING:  Failed to detect a suitable output format for gnuplot.  Looked for png, svg\n";
+        print STDERR "-- WARNING:  and gif; found none of them.  Specify a format with gnuplotImageFormat=<type>,\n";
+        print STDERR "-- WARNING:  or set 'gnuplot=undef' to disable gnuplot entirely.  Plots will be disabled.\n";
+        print STDERR "-- WARNING:\n";
+        print STDERR "--\n";
+
+        goto cleanupGnuplot;
     }
 
     #  Test if we can actually make images.
@@ -1093,30 +1294,35 @@ sub checkGnuplot () {
     print F "bogus line\n";
     close(F);
 
-    #  Dang, we don't have runCommandSilently here, so have to do it the hard way.
-
     system("cd /tmp && $gnuplot < /dev/null /tmp/gnuplot-$$-test.gp > /tmp/gnuplot-$$-test.err 2>&1");
 
     if ((! -e "/tmp/gnuplot-$$-test.1.$format") ||
         (! -e "/tmp/gnuplot-$$-test.2.$format")) {
-        addCommandLineError("ERROR:  gnuplot failed to generate images.\n");
+
+        print STDERR "--\n";
+        print STDERR "-- WARNING:\n";
+        print STDERR "-- WARNING:  gnuplot failed to generate images.  Specify a format with gnuplotImageFormat=<type>,\n";
+        print STDERR "-- WARNING:  or set 'gnuplot=undef' to disable gnuplot entirely.  Plots will be disabled.\n";
+        print STDERR "-- WARNING:\n";
+        print STDERR "-- WARNING:  gnuplot reports:\n";
 
         open(F, "< /tmp/gnuplot-$$-test.err");
         while (<F>) {
             chomp;
-            addCommandLineError("ERROR:  gnuplot reports:  $_\n");
+            print STDERR "-- WARNING:      $_\n";
         }
         close(F);
 
-        addCommandLineError("ERROR:  Set option gnuplotImageFormat=<type>, or gnuplotTested=true to skip this test and not generate plots.\n");
-        return;
+        print STDERR "--\n";
+
+        goto cleanupGnuplot;
     }
 
     #  Yay, gnuplot works!
 
     print STDERR "-- Detected gnuplot version '$version' (from '$gnuplot') and image format '$format'.\n";
-    #addCommandLineOption("gnuplotTested=1");
 
+ cleanupGnuplot:
     unlink "/tmp/gnuplot-$$-test.gp";
     unlink "/tmp/gnuplot-$$-test.err";
     unlink "/tmp/gnuplot-$$-test.1.$format";
@@ -1152,10 +1358,12 @@ sub checkParameters () {
     fixCase("stopAfter");
 
     #
-    #  Well, crud.  'gridEngine' wants to be uppercase, not lowercase like fixCase() would do.
+    #  Well, crud.  'gridEngine' and 'objectStore' want to be uppercase, not lowercase like
+    #  fixCase() would do.
     #
 
-    $global{"gridengine"} =~ tr/a-z/A-Z/;  #  NOTE: lowercase 'gridengine'
+    $global{"gridengine"}  =~ tr/a-z/A-Z/;  #  NOTE: lowercase 'gridengine'
+    $global{"objectstore"} =~ tr/a-z/A-Z/;  #  NOTE: lowercase 'objectstore'
 
     #
     #  Check for inconsistent parameters
@@ -1179,15 +1387,58 @@ sub checkParameters () {
         }
     }
 
-    foreach my $var ("corOvlErrorRate", "obtOvlErrorRate", "utgOvlErrorRate", "corErrorRate", "obtErrorRate", "utgErrorRate", "cnsErrorRate") {
-        if (!defined(getGlobal($var))) {
-            addCommandLineError("ERROR:  Invalid '$var' specified; must be set\n");
+    #
+    #  If we're running as a job array, unset the ID of the job array.  This screws
+    #  up our scheduling, as our jobs think they're running in a task array.
+    #
+    #  Silly SGE sets this to 'undefined' for normal jobs.
+    #
+
+    if (exists($ENV{getGlobal("gridEngineTaskID")})) {
+        my $ja = $ENV{getGlobal("gridEngineTaskID")};
+
+        if (($ja ne "undefined") &&
+            ($ja ne "0")) {
+            print STDERR "--\n";
+            print STDERR "-- I appear to be task $ja in a job array, unsetting ", getGlobal("gridEngineTaskID"), ".\n";
         }
-        elsif (getGlobal($var) !~ m/^[.-0123456789]/) {
+
+        undef $ENV{getGlobal("gridEngineTaskID")};
+    }
+
+    #  Undefined error rate are OK; we'll set them to defaults later.
+    #  Non-numeric or negative (or too positive) rates are definitely bad.
+
+    foreach my $var ("corOvlErrorRate", "obtOvlErrorRate", "utgOvlErrorRate", "corErrorRate", "obtErrorRate", "utgErrorRate", "cnsErrorRate") {
+        if    (!defined(getGlobal($var))) {
+        }
+        elsif (getGlobal($var) !~ m/^[.-0123456789]+$/) {
             addCommandLineError("ERROR:  Invalid '$var' specified (" . getGlobal("$var") . "); must be numeric\n");
         }
         elsif ((getGlobal($var) < 0.0) || (getGlobal($var) > 1.0)) {
             addCommandLineError("ERROR:  Invalid '$var' specified (" . getGlobal("$var") . "); must be at least 0.0 and no more than 1.0\n");
+        }
+    }
+
+    foreach my $var ("corOvlMerDistinct", "obtOvlMerDistinct", "utgOvlMerDistinct") {
+        if    (!defined(getGlobal($var))) {
+        }
+        elsif (getGlobal($var) !~ m/^[.-0123456789]+$/) {
+            addCommandLineError("ERROR:  Invalid '$var' specified (" . getGlobal("$var") . "); must be numeric\n");
+        }
+        elsif ((getGlobal($var) < 0.0) || (getGlobal($var) > 1.0)) {
+            addCommandLineError("ERROR:  Invalid '$var' specified (" . getGlobal("$var") . "); must be at least 0.0 and no more than 1.0\n");
+        }
+    }
+
+    foreach my $var ("corOvlMerThreshold", "obtOvlMerThreshold", "utgOvlMerThreshold") {
+        if    (!defined(getGlobal($var))) {
+        }
+        elsif (getGlobal($var) !~ m/^[0123456789]+$/) {
+            addCommandLineError("ERROR:  Invalid '$var' specified (" . getGlobal("$var") . "); must be an integer\n");
+        }
+        elsif (getGlobal($var) < 2) {
+            addCommandLineError("ERROR:  Invalid '$var' specified (" . getGlobal("$var") . "); must be at least 2\n");
         }
     }
 
@@ -1205,7 +1456,7 @@ sub checkParameters () {
         elsif (getGlobal($var) =~ m/all/i) {
             setGlobal($var, 9999);
         }
-        elsif (getGlobal($var) !~ m/^[.-0123456789]/) {
+        elsif (getGlobal($var) !~ m/^[.-0123456789]+$/) {
             addCommandLineError("ERROR:  Invalid '$var' specified (" . getGlobal("$var") . "); must be numeric\n");
         }
         elsif (getGlobal($var) < 1.0) {
@@ -1231,7 +1482,7 @@ sub checkParameters () {
         if (!defined(getGlobal($var))) {
             addCommandLineError("ERROR:  Invalid '$var' specified; must be set\n");
         }
-        elsif (getGlobal($var) !~ m/^[.-0123456789]/) {
+        elsif (getGlobal($var) !~ m/^[.-0123456789]+$/) {
             addCommandLineError("ERROR:  Invalid '$var' specified (" . getGlobal("$var") . "); must be numeric\n");
         }
         elsif (getGlobal($var) < 0.0) {
@@ -1264,22 +1515,9 @@ sub checkParameters () {
         }
     }
 
-    if ((getGlobal("ovsMethod") ne "sequential") &&
-        (getGlobal("ovsMethod") ne "parallel") &&
-        (getGlobal("ovsMethod") ne "forceparallel")) {
-        addCommandLineError("ERROR:  Invalid 'ovsMethod' specified (" . getGlobal("ovsMethod") . "); must be 'sequential', 'parallel', or 'forceparallel' (not recommended)\n");
-    }
-    if ((getGlobal("useGrid")   eq "0") &&
-        (getGlobal("ovsMethod") eq "parallel")) {
-        setGlobal("ovsMethod", "sequential");
-        #addCommandLineError("ERROR:  ovsMethod=parallel requires useGrid=true or useGrid=remote.  Set ovsMethod=sequential if no grid is available, or ovsMethod=forceparallel to use the (disk intensive) parallel method\n");
-    }
-    if (getGlobal("ovsMethod") eq "forceparallel") {
-        setGlobal("ovsMethod", "parallel");
-    }
-
-    if ((getGlobal("unitigger") ne "bogart")) {
-        addCommandLineError("ERROR:  Invalid 'unitigger' specified (" . getGlobal("unitigger") . "); must be 'unitigger' or 'bogart'\n");
+    if ((getGlobal("unitigger") ne "bogart") &&
+        (getGlobal("unitigger") ne "wtdbg")) {
+        addCommandLineError("ERROR:  Invalid 'unitigger' specified (" . getGlobal("unitigger") . "); must be 'wtdbg' or 'bogart'\n");
     }
 
     if ((getGlobal("corConsensus") ne "falcon")) {
@@ -1317,30 +1555,56 @@ sub checkParameters () {
         addCommandLineError("ERROR:  Invalid 'useGrid' specified (" . getGlobal("useGrid") . "); must be 'true', 'false' or 'remote'\n");
     }
 
+
+    if ((getGlobal("objectStore") ne "") &&
+        (getGlobal("objectStore") ne "TEST") &&
+        (getGlobal("objectStore") ne "DNANEXUS")) {
+        addCommandLineError("ERROR:  Invalid 'objectStore' specified (" . getGlobal("objectStore") . "); must be unset or 'DNANEXUS'\n");
+    }
+
+    if ((defined(getGlobal("objectStore"))) && (!defined(getGlobal("objectStoreClient")))) {
+        addCommandLineError("ERROR:  objectStoreClient must be specified if objectStore is specified\n");
+    }
+
+    if ((getGlobal("objectStore") eq "DNANEXUS") && (!defined(getGlobal("objectStoreProject")))) {
+        addCommandLineError("ERROR:  objectStoreProject must be specified if objectStore=DNANEXUS is specified\n");
+    }
+
+
     if (defined(getGlobal("stopAfter"))) {
         my $ok = 0;
         my $st = getGlobal("stopAfter");
         $st =~ tr/A-Z/a-z/;
 
+        $st = "correctiom"   if ($st eq "readcorrection");    #  Update the string to allow deprecated usage.
+        $st = "trimming"     if ($st eq "readtrimming");
+
         my $failureString = "ERROR:  Invalid stopAfter specified (" . getGlobal("stopAfter") . "); must be one of:\n";
 
-        my @stopAfter = ("gatekeeper",
+        my @stopAfter = ("sequenceStore",
+                         "meryl-configure",
+                         "meryl-count",
+                         "meryl-merge",
+                         "meryl-process",
+                         "meryl-subtract",
                          "meryl",
+                         "haplotype-configure",
+                         "haplotype",
                          "overlapConfigure",
                          "overlap",
                          "overlapStoreConfigure",
                          "overlapStore",
-                         "readCorrection",
-                         "readTrimming",
+                         "correction",
+                         "trimming",
                          "unitig",
                          "consensusConfigure",
-                         "consensusCheck",
-                         "consensusLoad",
-                         "consensusAnalyze");
+                         "consensus");
 
         foreach my $sa (@stopAfter) {
             $failureString .= "ERROR:      '$sa'\n";
+
             $sa =~ tr/A-Z/a-z/;
+
             if ($st eq $sa) {
                 $ok++;
                 setGlobal('stopAfter', $st);

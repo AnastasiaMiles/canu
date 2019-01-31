@@ -12,7 +12,7 @@ uniquely-assemblable contigs, unitigs.  Canu owes lots of it design and code to
 `celera-assembler <Celera Assembler>`_.
 
 Canu can be run using hardware of nearly any shape or size, anywhere from laptops to computational
-grids with thousands of nodes.  Obviouisly, larger assemblies will take a long time to compute on
+grids with thousands of nodes.  Obviously, larger assemblies will take a long time to compute on
 laptops, and smaller assemblies can't take advantage of hundreds of nodes, so what is being
 assembled plays some part in determining what hardware can be effectively used.
 
@@ -174,7 +174,7 @@ Execution Configuration
 
 There are two modes that canu runs in: locally, using just one machine, or grid-enabled, using
 multiple hosts managed by a grid engine.  LSF, PBS/Torque, PBSPro, Sun Grid Engine (and
-derivations), and Slurm are supported, though LSF has has limited testing. Section
+derivations), and Slurm are supported, though LSF has had limited testing. Section
 :ref:`grid-engine-config` has a few hints on how to set up a new grid engine.
 
 By default, if a grid is detected the canu pipeline will immediately submit itself to the grid and
@@ -223,14 +223,14 @@ confidence you can figure out the missing values:
 ==============  =============
 Fraction Error  Percent Error
 ==============  =============
-0.01            1%           
-0.02            2%           
-0.03            3%           
-.               .            
-.               .            
-0.12            12%          
-.               .            
-.               .            
+0.01            1%
+0.02            2%
+0.03            3%
+.               .
+.               .
+0.12            12%
+.               .
+.               .
 ==============  =============
 
 Canu error rates always refer to the percent difference in an alignment of two reads, not the
@@ -320,7 +320,7 @@ Ovl Overlapper Parameters
   how many bases to reads to include in the hash table; directly controls process size
 <tag>ovlRefBlockSize
   how many reads to compute overlaps for in one process; directly controls process time
-<tag>ovlRefBlockLength 
+<tag>ovlRefBlockLength
  same, but use 'bases in reads' instead of 'number of reads'
 <tag>ovlHashBits
   size of the hash table (SHOULD BE REMOVED AND COMPUTED, MAYBE TWO PASS)
@@ -390,7 +390,7 @@ Minimap Overlapper Parameters
 <tag>MMapMerSize
   Use k-mers of this size for detecting overlaps
 
-Minimap also will ignore high-frequency minimzers, but it's selection of frequent is not exposed.
+Minimap also will ignore high-frequency minimizers, but it's selection of frequent is not exposed.
 
 .. _outputs:
 
@@ -403,7 +403,74 @@ the analysis is captured in ``<prefix>.report`` as well.
 LOGGING
 
 <prefix>.report
-  Most of the analysis reported during assembly.
+  Most of the analysis reported during assembly. This will report the histogram of read lengths, the histogram or k-mers in the raw and corrected reads, the summary of corrected data, summary of overlaps, and the summary of contig lengths. 
+  
+  You can use the k-mer corrected read histograms with tools like `GenomeScope <http://qb.cshl.edu/genomescope/>`_ to estimate heterozygosity and genome size. In particular, histograms with more than 1 peak likely indicate a heterozygous genome. See the :ref:`FAQ` for some suggested parameters.
+  
+  The corrected read report gives a summary of the fate of all input reads. The first part:::
+
+    --                             original      original
+    --                            raw reads     raw reads
+    --   category                w/overlaps  w/o/overlaps
+    --   -------------------- ------------- -------------
+    --   Number of Reads             250609           477
+    --   Number of Bases         2238902045       1896925
+    --   Coverage                    97.344         0.082
+    --   Median                        6534          2360
+    --   Mean                          8933          3976
+    --   N50                          11291          5756
+    --   Minimum                       1012             0
+    --   Maximum                      60664         41278
+
+  reports the fraction of reads which had an overlap. In this case, the majority had at least one overlap, which is good. Next::
+  
+    --                                        --------corrected---------  
+    --                             evidence                     expected      
+    --   category                     reads            raw     corrected
+    --   -------------------- -------------  ------------- -------------
+    --   Number of Reads             229397          48006         48006      
+    --   Number of Bases         2134291652      993586222     920001699     
+    --   Coverage                    92.795         43.199        40.000          
+    --   Median                        6842          15330         14106           
+    --   Mean                          9303          20697         19164           
+    --   N50                          11512          28066         26840           
+    --   Minimum                       1045          10184         10183         
+    --   Maximum                      60664          60664         59063     
+    --   
+
+  reports that a total of 92.8x of raw bases are candidates for correction. By default, Canu only selects the longest 40x for correction. In this case, it selects 43.2x of raw read data which it estimates will result in 40x correction. Not all raw reads survive full-length through correction::
+
+    --                            ----------rescued----------
+    --                                        expected
+    --   category                     raw     corrected
+    --   --------------------   ------------- -------------
+    --   Number of Reads               20030         20030
+    --   Number of Bases            90137165      61903752
+    --   Coverage                      3.919         2.691
+    --   Median                         3324          2682
+    --   Mean                           4500          3090
+    --   N50                            5529          3659
+    --   Minimum                        1012           501
+    --   Maximum                       41475         10179
+
+  The rescued reads are those which would not have contributed to the correction of the selected longest 40x subset. These could be short plasmids, mitochondria, etc. Canu includes them even though they're too short by the 40x cutoff to avoid losing sequence during assembly. Lastly::
+
+    --                        --------uncorrected--------
+    --                                           expected
+    --   category                       raw     corrected
+    --   -------------------- ------------- -------------
+    --   Number of Reads             183050        183050
+    --   Number of Bases         1157075583     951438105
+    --   Coverage                    50.308        41.367
+    --   Median                        5729          5086
+    --   Mean                          6321          5197
+    --   N50                           7467          6490
+    --   Minimum                          0             0
+    --   Maximum                      50522         10183
+
+  are the reads which were deemed too short to correct. If you increase ``corOutCoverage``, you could get up to 41x more corrected sequence. However, unless the genome is very heterozygous, this does not typically improve the assembly and increases the running time.
+  
+  The assembly statistics (NG50, etc) are reported before and after consensus calling.
 
 READS
 
@@ -453,10 +520,10 @@ The header line for each sequence provides some metadata on the sequence.::
 GRAPHS
 
 <prefix>.contigs.gfa
-  Unused or ambiguous edges between contig sequences.  Bubble edges cannot be represented in this format.
+  Unused or ambiguous edges between contig sequences.  The GFA format cannot represent partial overlaps between contigs (that is part of contig A overlaps with part of contig B). For more details see the discussion of general edges on the `GFA2 <https://github.com/GFA-spec/GFA-spec/blob/master/GFA2.md>`_ page.
 
 <prefix>.unitigs.gfa
-  Contigs split at bubble intersections.
+  Since the GFA format cannot represent partial overlaps, the contigs are split at all such overlap junctions into unitigs. The unitigs capture non-branching subsequences within the contigs and will break at any ambiguity (e.g. a haplotype switch).
 
 <prefix>.unitigs.bed
   The position of each unitig in a contig.

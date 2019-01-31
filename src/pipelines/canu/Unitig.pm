@@ -43,16 +43,20 @@ require Exporter;
 @EXPORT = qw(reportUnitigSizes unitig unitigCheck);
 
 use strict;
+use warnings "all";
+no  warnings "uninitialized";
 
 use File::Path 2.08 qw(make_path remove_tree);
 use POSIX qw(ceil);
 
 use canu::Defaults;
 use canu::Execution;
+
 use canu::Configure;    #  For displayGenomeSize
-use canu::Gatekeeper;
-use canu::Report;
+use canu::SequenceStore;
 use canu::Meryl;
+use canu::Report;
+
 use canu::Grid_Cloud;
 
 
@@ -87,13 +91,11 @@ sub reportUnitigSizes ($$$) {
     fetchFile("unitigging/$N");
 
     if (! -e "unitigging/$N") {
-        fetchStore("unitigging/$asm.gkpStore");
-
         fetchFile("unitigging/$asm.ctgStore/seqDB.v$V.dat");
         fetchFile("unitigging/$asm.ctgStore/seqDB.v$V.tig");
 
         $cmd  = "$bin/tgStoreDump \\\n";                     #  Duplicated at the end of unitigger.sh
-        $cmd .= "  -G ./$asm.gkpStore \\\n";
+        $cmd .= "  -S ../$asm.seqStore \\\n";
         $cmd .= "  -T ./$asm.ctgStore $version \\\n";
         $cmd .= "  -sizes -s " . getGlobal("genomeSize") . " \\\n";
         $cmd .= "> ./$N";
@@ -145,7 +147,7 @@ sub reportUnitigSizes ($$$) {
     $report .= "--   bubbles:      $bubNum sequences, total length $bubBases bp.\n";
     $report .= "--   unassembled:  $usmNum sequences, total length $usmBases bp.\n";
     $report .= "--\n";
-    $report .= "-- Contig sizes based on genome size ", displayGenomeSize($gs), "bp:\n";
+    $report .= "-- Contig sizes based on genome size " . displayGenomeSize($gs) . "bp:\n";
     $report .= "--\n";
     $report .= $ctgSizes;
     $report .= "--\n";
@@ -162,7 +164,6 @@ sub unitig ($) {
     my $asm     = shift @_;
     my $path    = "unitigging/4-unitigger";
 
-    goto allDone    if (skipStage($asm, "unitig") == 1);
     goto allDone    if (fileExists("unitigging/4-unitigger/unitigger.sh"));
     goto allDone    if (fileExists("unitigging/$asm.utgStore/seqDB.v001.tig") &&
                         fileExists("unitigging/$asm.ctgStore/seqDB.v001.tig"));
@@ -181,12 +182,17 @@ sub unitig ($) {
     print F "\n";
     print F getBinDirectoryShellCode();
     print F "\n";
+    print F "\n";
     print F setWorkDirectoryShellCode($path);
     print F "\n";
-    print F fetchStoreShellCode("unitigging/$asm.gkpStore", $path, "");
-    print F fetchStoreShellCode("unitigging/$asm.ovlStore", $path, "");
+    print F "\n";
+    print F fetchSeqStoreShellCode($asm, $path, "");
+    print F "\n";
+    print F fetchOvlStoreShellCode($asm, $path, "");
+    print F "\n";
     print F "\n";
     print F fetchFileShellCode("unitigging/$asm.ovlStore", "evalues", "");
+    print F "\n";
     print F "\n";
     print F getJobIDShellCode();
     print F "\n";
@@ -195,48 +201,125 @@ sub unitig ($) {
     print F "fi\n";
     print F "\n";
 
+    #  The 'if -e' below does nothing in Cloud mode, but it'd be a pain to support it properly.
+
     if      (getGlobal("unitigger") eq "bogart") {
-        print F "\$bin/bogart \\\n";
-        print F " -G ../$asm.gkpStore \\\n";
-        print F " -O ../$asm.ovlStore \\\n";
-        print F " -o ./$asm \\\n";
-        print F " -gs "             . getGlobal("genomeSize")         . " \\\n";
-        print F " -eg "             . getGlobal("utgErrorRate")       . " \\\n";
-        print F " -eM "             . getGlobal("utgErrorRate")       . " \\\n";
-        print F " -mo "             . $overlapLength                  . " \\\n";
-        print F " -dg "             . getGlobal("utgGraphDeviation")  . " \\\n";
-        print F " -db "             . getGlobal("utgGraphDeviation")  . " \\\n";
-        print F " -dr "             . getGlobal("utgRepeatDeviation") . " \\\n";
-        print F " -ca "             . getGlobal("utgRepeatConfusedBP"). " \\\n";
-        print F " -cp "             . "200"                           . " \\\n";
-        print F " -threads "        . getGlobal("batThreads")         . " \\\n"   if (defined(getGlobal("batThreads")));
-        print F " -M "              . getGlobal("batMemory")          . " \\\n"   if (defined(getGlobal("batMemory")));
-        print F " -unassembled "    . getGlobal("contigFilter")       . " \\\n"   if (defined(getGlobal("contigFilter")));
-        print F " "                 . getGlobal("batOptions")         . " \\\n"   if (defined(getGlobal("batOptions")));
-        print F " > ./unitigger.err 2>&1 \\\n";
+
+        print F "#\n";
+        print F "#  Check if the outputs exist.\n";
+        print F "#\n";
+        print F "#  The boilerplate function for doing this fails if the file isn't\n";
+        print F "#  strictly below the current directory, so some gymnastics is needed.\n";
+        print F "#\n";
+        print F "\n";
+        print F "cd ..\n";
+        print F fileExistsShellCode("exists", "unitigging", "$asm.ctgStore/seqDB.v001.tig", "");
+        print F fileExistsShellCode("exists", "unitigging", "$asm.utgStore/seqDB.v001.tig", "");
+        print F "\n";
+        print F "cd 4-unitigger\n";
+        print F "\n";
+        print F "#\n";
+        print F "#  Run if needed.\n";
+        print F "#\n";
+        print F "\n";
+        print F "if [ \$exists = false ] ; then\n";
+        print F "  \$bin/bogart \\\n";
+        print F "    -S ../../$asm.seqStore \\\n";
+        print F "    -O    ../$asm.ovlStore \\\n";
+        print F "    -o     ./$asm \\\n";
+        print F "    -gs "          . getGlobal("genomeSize")         . " \\\n";
+        print F "    -eg "          . getGlobal("utgErrorRate")       . " \\\n";
+        print F "    -eM "          . getGlobal("utgErrorRate")       . " \\\n";
+        print F "    -mo "          . $overlapLength                  . " \\\n";
+        print F "    -dg "          . getGlobal("utgGraphDeviation")  . " \\\n";
+        print F "    -db "          . getGlobal("utgGraphDeviation")  . " \\\n";
+        print F "    -dr "          . getGlobal("utgRepeatDeviation") . " \\\n";
+        print F "    -ca "          . getGlobal("utgRepeatConfusedBP"). " \\\n";
+        print F "    -cp "          . "200"                           . " \\\n";
+        print F "    -threads "     . getGlobal("batThreads")         . " \\\n"   if (defined(getGlobal("batThreads")));
+        print F "    -M "           . getGlobal("batMemory")          . " \\\n"   if (defined(getGlobal("batMemory")));
+        print F "    -unassembled " . getGlobal("contigFilter")       . " \\\n"   if (defined(getGlobal("contigFilter")));
+        print F "    "              . getGlobal("batOptions")         . " \\\n"   if (defined(getGlobal("batOptions")));
+        print F "    > ./unitigger.err 2>&1 \\\n";
+        print F "  && \\\n";
+        print F "  mv ./$asm.ctgStore ../$asm.ctgStore \\\n";
+        print F "  && \\\n";
+        print F "  mv ./$asm.utgStore ../$asm.utgStore\n";
+        print F "fi\n";
+    }
+
+    elsif (getGlobal("unitigger") eq "wtdbg") {
+        print F "\$bin/sqStoreDumpFASTQ \\\n";
+        print F "  -S ../../$asm.seqStore \\\n";
+        print F "  -nolibname \\\n";
+        print F "  -noreadname \\\n";
+        print F "  -fasta \\\n";
+        print F "  -o $asm.input.gz \\\n";
         print F "&& \\\n";
-        print F "mv ./$asm.ctgStore ../$asm.ctgStore \\\n";
-        print F "&& \\\n";
-        print F "mv ./$asm.utgStore ../$asm.utgStore\n";
+        print F "mv -f $asm.input.fasta.gz $asm.fasta.gz\n";
+        print F "if [ ! -e ./$asm.fasta.gz ] ; then\n";
+        print F "  echo Failed to extract fasta.\n";
+        print F "  exit 1\n";
+        print F "fi\n";
+        print F "\n";
+        print F "\n";
+        print F "\$bin/wtdbg-1.2.8 \\\n";
+        print F " -i $asm.fasta.gz \\\n";
+        print F " -fo ./$asm \\\n";
+        print F " -S "              . "2"                     . " \\\n";
+        print F " --edge-min "      . "2"                     . " \\\n";
+        print F " -l "             . $overlapLength           . " \\\n";
+        print F " -t "              . getGlobal("dbgThreads") . " \\\n"   if (defined(getGlobal("dbgThreads")));
+        print F " "                 . getGlobal("dbgOptions") . " \\\n"   if (defined(getGlobal("dbgOptions")));
+        print F " > ./unitigger.err 2>&1 \n";
+        print F "if [ ! -s ./$asm.ctg.lay ]; then \n";
+        print F "  echo Failed to run wtdbg.\n";
+        print F "  exit 1\n";
+        print F "fi\n";
+        print F "\n";
+        print F "\n";
+        print F " \$bin/wtdbgConvert -o ./$asm -S ../../$asm.seqStore $asm.ctg.lay \\\n";
+        print F "  && \\\n";
+        print F "  cp -r ./$asm.ctgStore ../$asm.utgStore \\\n";
+        print F "  && \\\n";
+        print F "  mv ./$asm.ctgStore ../$asm.ctgStore\n";
+        print F "fi\n";
+
     } else {
         caFailure("unknown unitigger '" . getGlobal("unitigger") . "'", undef);
     }
 
     print F "\n";
+    print F "if [ ! -e ../$asm.ctgStore -o \\\n";
+    print F "     ! -e ../$asm.utgStore ] ; then\n";
+    print F "  echo bogart appears to have failed.  No $asm.ctgStore or $asm.utgStore found.\n";
+    print F "  exit 1\n";
+    print F "fi\n";
+    print F "\n";
+    print F "\n";
     print F stashFileShellCode("unitigging/4-unitigger", "$asm.unitigs.gfa", "");
+    print F "\n";
     print F stashFileShellCode("unitigging/4-unitigger", "$asm.contigs.gfa", "");
     print F "\n";
+    print F stashFileShellCode("unitigging/4-unitigger", "$asm.unitigs.bed", "");
+    print F "\n";
+    print F "\n";
     print F stashFileShellCode("unitigging/$asm.ctgStore", "seqDB.v001.dat", "");
+    print F "\n";
     print F stashFileShellCode("unitigging/$asm.ctgStore", "seqDB.v001.tig", "");
     print F "\n";
+    print F "\n";
     print F stashFileShellCode("unitigging/$asm.utgStore", "seqDB.v001.dat", "");
+    print F "\n";
     print F stashFileShellCode("unitigging/$asm.utgStore", "seqDB.v001.tig", "");
     print F "\n";
-    print F "\$bin/tgStoreDump \\\n";                    #  Duplicated in reportUnitigSizes()
-    print F "  -G ../$asm.gkpStore \\\n";                 #  Done here so we don't need another
-    print F "  -T ../$asm.ctgStore 1 \\\n";               #  pull of gkpStore and ctgStore
-    print F "  -sizes -s " . getGlobal("genomeSize") . " \\\n";
-    print F "> ../$asm.ctgStore/seqDB.v001.sizes.txt";
+    print F "if [ ! -e ../$asm.ctgStore/seqDB.v001.sizes.txt ] ; then\n";
+    print F "  \$bin/tgStoreDump \\\n";                     #  Duplicated in reportUnitigSizes()
+    print F "    -S ../../$asm.seqStore \\\n";              #  Done here so we don't need another
+    print F "    -T ../$asm.ctgStore 1 \\\n";               #  pull of seqStore and ctgStore
+    print F "    -sizes -s " . getGlobal("genomeSize") . " \\\n";
+    print F "   > ../$asm.ctgStore/seqDB.v001.sizes.txt\n";
+    print F "fi\n";
     print F "\n";
     print F stashFileShellCode("unitigging/$asm.ctgStore", "seqDB.v001.sizes.txt", "");
     print F "\n";
@@ -248,7 +331,8 @@ sub unitig ($) {
     stashFile("$path/unitigger.sh");
 
   finishStage:
-    emitStage($asm, "unitig");
+    generateReport($asm);
+    resetIteration("unitig");
 
   allDone:
 }
@@ -261,7 +345,6 @@ sub unitigCheck ($) {
     my $attempt = getGlobal("canuIteration");
     my $path    = "unitigging/4-unitigger";
 
-    goto allDone      if (skipStage($asm, "unitigCheck", $attempt) == 1);
     goto allDone      if (fileExists("$path/unitigger.success"));
     goto finishStage  if (fileExists("unitigging/$asm.utgStore/seqDB.v001.tig") &&
                           fileExists("unitigging/$asm.ctgStore/seqDB.v001.tig"));
@@ -270,7 +353,7 @@ sub unitigCheck ($) {
 
     #  Since there is only one job, if we get here, we're not done.  Any other 'check' function
     #  shows how to process multiple jobs.  This only checks for the existence of the final outputs.
-    #  (meryl is the same)
+    #  (meryl-process, unitig, overlapStoreSequential are the same)
 
     #  If too many attempts, give up.
 
@@ -278,6 +361,7 @@ sub unitigCheck ($) {
         print STDERR "--\n";
         print STDERR "-- Bogart failed, tried $attempt times, giving up.\n";
         print STDERR "--\n";
+        caExit(undef, "$path/unitigger.err")   if (-e "$path/unitigger.err");
         caExit(undef, undef);
     }
 
@@ -289,7 +373,7 @@ sub unitigCheck ($) {
 
     #  Otherwise, run some jobs.
 
-    emitStage($asm, "unitigCheck", $attempt);
+    generateReport($asm);
 
     submitOrRunParallelJob($asm, "bat", $path, "unitigger", (1));
     return;
@@ -306,7 +390,8 @@ sub unitigCheck ($) {
 
     reportUnitigSizes($asm, 1, "after unitig construction");
 
-    emitStage($asm, "unitigCheck");
+    generateReport($asm);
+    resetIteration("unitigCheck");
 
   allDone:
     stopAfter("unitig");

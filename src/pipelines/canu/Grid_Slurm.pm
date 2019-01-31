@@ -35,10 +35,15 @@ require Exporter;
 @EXPORT = qw(detectSlurm configureSlurm);
 
 use strict;
+use warnings "all";
+no  warnings "uninitialized";
 
 use canu::Defaults;
 use canu::Execution;
-use canu::Grid;
+
+use canu::Grid "formatAllowedResources";
+
+
 
 sub detectSlurm () {
 
@@ -81,9 +86,7 @@ sub configureSlurm () {
     setGlobalIfUndef("gridEngineArrayName",                  "ARRAY_NAME");
     setGlobalIfUndef("gridEngineArrayMaxJobs",               $maxArraySize);
     setGlobalIfUndef("gridEngineOutputOption",               "-o");                                        ## NB: SLURM default joins STDERR & STDOUT if no -e specified
-    setGlobalIfUndef("gridEngineThreadsOption",              "--cpus-per-task=THREADS");
-    setGlobalIfUndef("gridEngineMemoryOption",               "--mem-per-cpu=MEMORY");
-    setGlobalIfUndef("gridEnginePropagateCommand",           "scontrol update job=\"WAIT_TAG\"");          ## TODO: manually verify this in all cases
+    setGlobalIfUndef("gridEngineResourceOption",             "--cpus-per-task=THREADS --mem-per-cpu=MEMORY");
     setGlobalIfUndef("gridEngineNameToJobIDCommand",         "squeue -h -o\%F -n \"WAIT_TAG\" | uniq");    ## TODO: manually verify this in all cases
     setGlobalIfUndef("gridEngineNameToJobIDCommandNoArray",  "squeue -h -o\%i -n \"WAIT_TAG\"");     ## TODO: manually verify this in all cases
     setGlobalIfUndef("gridEngineTaskID",                     "SLURM_ARRAY_TASK_ID");
@@ -118,9 +121,9 @@ sub configureSlurm () {
     while (<F>) {
         my @v = split '\s+', $_;
 
-        my $cpus  = $v[$cpuIdx];
-        my $mem   = $v[$memIdx] / 1024;
-        my $nodes = $v[$nodeIdx];
+        my $cpus  = int($v[$cpuIdx]);
+        my $mem   = int($v[$memIdx] / 1024 - 0.5);   #  Round down.
+        my $nodes = int($v[$nodeIdx]);
 
         $hosts{"$cpus-$mem"}+=int($nodes)    if ($cpus gt 0);
     }
